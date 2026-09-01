@@ -180,6 +180,20 @@ function openaiToGeminiBase(
       toolNameMap,
     });
 
+  // Reserve the current declaration names before translating historical tool calls.
+  // Responses clients replay the full conversation on every turn. If a prior turn
+  // contains a sanitized alias that collides with a current raw declaration, allowing
+  // history to populate toolNameMap first can force the declaration through progressively
+  // longer hashes and eventually the Date.now() fallback. That makes the same tool acquire
+  // a new wire name on every request and can pollute long-running Gemini conversations.
+  // Current declarations are authoritative, so seed their stable aliases first and reuse
+  // the converted tools after message translation.
+  const bodyTools = body.tools as Array<Record<string, unknown>> | undefined;
+  const geminiTools = buildGeminiTools(bodyTools, {
+    ...toolNameOptions,
+    toolNameMap,
+  });
+
   // Preserve cachedContent if provided by client (for explicit Gemini caching)
   if (body.cachedContent) {
     result.cachedContent = body.cachedContent as string;
@@ -561,12 +575,6 @@ function openaiToGeminiBase(
   result.contents = mergeConsecutiveSameRoleContents(result.contents ?? []);
 
   // Convert tools
-  const bodyTools = body.tools as Array<Record<string, unknown>> | undefined;
-  const geminiTools = buildGeminiTools(bodyTools, {
-    ...toolNameOptions,
-    toolNameMap,
-  });
-
   // Support for Google Search grounding if requested via 'google_search' tool
   const hasGoogleSearch = bodyTools?.some((t) => {
     const fn = t.function as { name?: string } | undefined;
