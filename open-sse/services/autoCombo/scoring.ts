@@ -259,8 +259,12 @@ export function evaluateCandidateEligibility(
     return reject("context_window");
   }
 
-  const floor = requirements.minTaskFitness ?? capabilityFloorForTask(taskType);
-  if (taskFitness < floor) return reject("capability_mismatch");
+  // A neutral fitness score means no evidence, not an incompatibility. Callers
+  // that have a verified task-capability floor opt in explicitly; provider
+  // execution requirements remain hard regardless of score availability.
+  if (requirements.minTaskFitness !== undefined && taskFitness < requirements.minTaskFitness) {
+    return reject("capability_mismatch");
+  }
   return { eligible: true, reason: null, taskFitness };
 }
 

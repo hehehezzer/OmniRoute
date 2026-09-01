@@ -336,35 +336,21 @@ class LKGPStrategyImpl implements RouterStrategy {
       return getStrategy("rules").select(pool, context);
     }
 
-    const ranked = rankCheapestCapable(
+    const candidates = filterEligibleCapableCandidates(
       pool,
       {
         ...context.capabilityRequirements,
         taskType: context.taskType,
         estimatedInputTokens: context.estimatedInputTokens,
       },
-      undefined,
       getTaskFitness
     );
-    if (ranked.length === 0) throw new Error("[LKGPStrategy] No eligible capable candidates");
-    const candidateByIdentity = new Map(
-      pool.map((candidate) => [
-        `${candidate.provider}\0${candidate.model}\0${candidate.connectionId ?? ""}`,
-        candidate,
-      ])
-    );
-    const costOf = (candidate: ScoredProvider) =>
-      candidateByIdentity.get(
-        `${candidate.provider}\0${candidate.model}\0${candidate.connectionId ?? ""}`
-      )?.costPer1MTokens ?? Number.POSITIVE_INFINITY;
-    const cheapestCost = costOf(ranked[0]);
-    const cheapestBand = ranked.filter(
-      (candidate) =>
-        Math.abs(costOf(candidate) - cheapestCost) <= Math.max(1e-9, Math.abs(cheapestCost) * 0.001)
-    );
+    if (candidates.length === 0) {
+      throw new Error("[LKGPStrategy] No eligible capable candidates");
+    }
 
     if (context.lastKnownGoodProvider) {
-      const best = cheapestBand.find(
+      const best = candidates.find(
         (candidate) => candidate.provider === context.lastKnownGoodProvider
       );
       if (best) {
@@ -374,22 +360,15 @@ class LKGPStrategyImpl implements RouterStrategy {
           strategy: this.name,
           reason: `LKGP: using last known good provider ${best.provider}`,
           candidatesConsidered: 1,
-          finalScore: best.score,
+          finalScore: 1.0,
           connectionId: best.connectionId,
         };
       }
     }
 
-    const best = ranked[0];
-    return {
-      provider: best.provider,
-      model: best.model,
-      strategy: this.name,
-      reason: `LKGP: last-known-good was not in the cheapest capable band; selected cost-optimal ${best.provider}`,
-      candidatesConsidered: ranked.length,
-      finalScore: best.score,
-      connectionId: best.connectionId,
-    };
+    // Preserve LKGPs documented fallback semantics while keeping the candidate
+    // pool capability/health-filtered. Cost ordering applies to the rules path.
+    return getStrategy("rules").select(candidates, context);
   }
 }
 

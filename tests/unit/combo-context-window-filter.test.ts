@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 
 // Regression tests for the context-aware combo compatibility filter.
-// Known hard context limits are dispatch barriers. Unknown limits remain eligible,
-// and exact operator overrides are the escape hatch for stale catalog metadata.
+// Context metadata is advisory: known-fitting targets are preferred, while
+// unknown and catalog-too-small targets remain available for runtime fallback.
 
 const TEST_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-combo-context-filter-"));
 const ORIGINAL_DATA_DIR = process.env.DATA_DIR;
@@ -126,6 +126,7 @@ test("known compatible context target is preferred while unknown targets remain 
     [
       "unit-known-context/million",
       "unit-unknown-context/mystery-a",
+      "unit-known-context/tiny",
       "unit-unknown-context/mystery-b",
     ]
   );
@@ -169,11 +170,11 @@ test("unknown-context targets do not become the only survivors when no known-com
 
   assert.deepEqual(
     out.map((entry) => entry.modelStr),
-    ["unit-unknown-context/mystery-a", "unit-unknown-context/mystery-b"]
+    ["unit-unknown-context/mystery-a", "unit-known-context/tiny", "unit-unknown-context/mystery-b"]
   );
 });
 
-test("all known-too-small context targets are rejected before dispatch", () => {
+test("all known-too-small context targets still fall back to strategy order", () => {
   saveModelsDevCapabilities({
     "unit-known-context": {
       tiny: capabilityEntry(8_000),
@@ -187,7 +188,10 @@ test("all known-too-small context targets are rejected before dispatch", () => {
     noopLog
   );
 
-  assert.deepEqual(out, []);
+  assert.deepEqual(
+    out.map((entry) => entry.modelStr),
+    ["unit-known-context/tiny", "unit-known-context/small"]
+  );
 });
 
 test("output-token limits remain a hard compatibility requirement", () => {
@@ -210,7 +214,7 @@ test("output-token limits remain a hard compatibility requirement", () => {
   );
 });
 
-test("combo does not dispatch requests exceeding every known hard context limit", async () => {
+test("combo dispatches requests that only an approximate estimate marks oversized", async () => {
   saveModelsDevCapabilities({
     "unit-known-context": {
       tiny: capabilityEntry(8_000),
@@ -236,11 +240,11 @@ test("combo does not dispatch requests exceeding every known hard context limit"
     log: noopLog,
   });
 
-  assert.notEqual(response.status, 200);
-  assert.equal(dispatches, 0);
+  assert.equal(response.status, 200);
+  assert.equal(dispatches, 1);
 });
 
-test("round-robin does not dispatch requests exceeding every known hard context limit", async () => {
+test("round-robin dispatches requests that only an approximate estimate marks oversized", async () => {
   saveModelsDevCapabilities({
     "unit-known-context": {
       tiny: capabilityEntry(8_000),
@@ -266,11 +270,11 @@ test("round-robin does not dispatch requests exceeding every known hard context 
     log: noopLog,
   });
 
-  assert.notEqual(response.status, 200);
-  assert.equal(dispatches, 0);
+  assert.equal(response.status, 200);
+  assert.equal(dispatches, 1);
 });
 
-test("native Responses context is rejected when it exceeds a known hard Codex limit", async () => {
+test("native Responses context reaches an all-Codex target beyond its catalog hint (#8932)", async () => {
   saveModelsDevCapabilities({
     codex: {
       large: capabilityEntry(272_000),
@@ -294,8 +298,8 @@ test("native Responses context is rejected when it exceeds a known hard Codex li
     log: noopLog,
   });
 
-  assert.equal(response.status, 400);
-  assert.equal(dispatches, 0);
+  assert.notEqual(response.status, 400);
+  assert.equal(dispatches, 1);
 });
 
 test("input-only maxInputTokens is not double-counted against the output reserve (#7039)", () => {
@@ -350,8 +354,11 @@ test("small input-only maxInputTokens keeps a target whose input fits even thoug
 });
 
 test("input-only maxInputTokens is demoted when the input itself exceeds the cap", () => {
-  // `too-small` has maxInputTokens = 1, which cannot hold the request, so it is
-  // excluded before dispatch while the known-fitting target remains eligible.
+  // #8944 made context metadata ADVISORY: a catalog-too-small target is no longer
+  // removed (a stale catalog entry must never delete the only target that could
+  // accept the request at runtime), it is ordered AFTER the known-fitting ones.
+  // `too-small` has maxInputTokens = 1, which cannot hold the ~11-token input, so
+  // it must lose the ordering to `huge` while remaining available as a fallback.
   saveModelsDevCapabilities({
     "unit-7039-too-small": {
       "too-small": capabilityEntryWithLimits(1, 1_000_000, 500),
@@ -367,14 +374,14 @@ test("input-only maxInputTokens is demoted when the input itself exceeds the cap
 
   assert.deepEqual(
     out.map((entry) => entry.modelStr),
-    ["unit-7039-too-small/huge"]
+    ["unit-7039-too-small/huge", "unit-7039-too-small/too-small"]
   );
 });
 
 test("maxInputTokens defaulting to contextWindow is demoted when input + output exceeds the total window (#7039 follow-up)", () => {
   // Shared-window model where maxInputTokens equals the total window size. The
   // input alone fits the input cap but input + output overflows the window, so the
-  // target is rejected before dispatch.
+  // target must not be PREFERRED — since #8944 it is demoted rather than dropped.
   saveModelsDevCapabilities({
     "unit-7039-window": {
       "shared-window": capabilityEntryWithLimits(400_000, 400_000, 200_000),
@@ -390,7 +397,7 @@ test("maxInputTokens defaulting to contextWindow is demoted when input + output 
 
   assert.deepEqual(
     out.map((entry) => entry.modelStr),
-    ["unit-7039-window/huge"]
+    ["unit-7039-window/huge", "unit-7039-window/shared-window"]
   );
 });
 
@@ -423,15 +430,17 @@ test("model_context_override lets a small-catalog target survive a large-context
   }
 });
 
-// Without an override, a catalog-too-small target is rejected before dispatch.
-test("without an override the small-catalog target is excluded for the large request", () => {
+// #8944: "dropped" became "demoted" — the small-catalog target survives as a
+// runtime fallback but must never outrank the one whose known limit fits.
+test("without an override the small-catalog target is ordered last for the large request", () => {
   saveModelsDevCapabilities({
     "unit-override": {
       big: capabilityEntry(1_000_000),
       capped: capabilityEntry(8_000),
     },
   });
-  // No override: capped (8K) is catalog-too-small and cannot be dispatched.
+  // No override: capped (8K) is catalog-too-small, so it stays behind the
+  // known-compatible target while remaining available as a runtime fallback.
   const out = filterTargetsByRequestCompatibility(
     [target("unit-override/capped"), target("unit-override/big")],
     largeContextBody(),
@@ -440,20 +449,15 @@ test("without an override the small-catalog target is excluded for the large req
 
   assert.deepEqual(
     out.map((entry) => entry.modelStr),
-    ["unit-override/big"]
+    ["unit-override/big", "unit-override/capped"]
   );
 });
-
 
 test("operator practical input limit excludes only oversized requests", () => {
   saveModelsDevCapabilities({
     "unit-practical": { constrained: capabilityEntry(1_000_000) },
   });
-  setModelCapabilityOverride(
-    "unit-practical/constrained",
-    "practical_input_tokens",
-    10_000
-  );
+  setModelCapabilityOverride("unit-practical/constrained", "practical_input_tokens", 10_000);
   try {
     const small = filterTargetsByRequestCompatibility(
       [target("unit-practical/constrained")],
@@ -468,9 +472,6 @@ test("operator practical input limit excludes only oversized requests", () => {
     assert.equal(small.length, 1);
     assert.deepEqual(large, []);
   } finally {
-    removeModelCapabilityOverride(
-      "unit-practical/constrained",
-      "practical_input_tokens"
-    );
+    removeModelCapabilityOverride("unit-practical/constrained", "practical_input_tokens");
   }
 });

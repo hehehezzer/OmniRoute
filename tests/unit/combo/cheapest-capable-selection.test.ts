@@ -53,12 +53,15 @@ test("capability floor beats price when the cheapest model is incapable", () => 
       candidate("cheap", 1, { model: "cheap-incapable" }),
       candidate("capable", 8, { model: "capable-coding" }),
     ],
-    { taskType: "coding" },
+    { taskType: "coding", minTaskFitness: 0.65 },
     undefined,
     fitness
   );
 
-  assert.deepEqual(ranked.map((entry) => entry.provider), ["capable"]);
+  assert.deepEqual(
+    ranked.map((entry) => entry.provider),
+    ["capable"]
+  );
 });
 
 test("rate-limited cheap candidate is removed before cost ranking", () => {
@@ -91,7 +94,10 @@ test("large input skips a cheap small-context candidate", () => {
     fitness
   );
 
-  assert.deepEqual(ranked.map((entry) => entry.provider), ["large"]);
+  assert.deepEqual(
+    ranked.map((entry) => entry.provider),
+    ["large"]
+  );
 });
 
 test("candidate becomes eligible again after cooldown state clears", () => {
@@ -124,11 +130,9 @@ test("open circuit is rejected while explicit half-open retry remains eligible",
     retryEligible: true,
   });
 
-  const ranked = rankCheapestCapable(
-    [open, halfOpen],
-    { taskType: "coding" },
-    undefined,
-    fitness
+  const ranked = rankCheapestCapable([open, halfOpen], { taskType: "coding" }, undefined, fitness);
+  assert.deepEqual(
+    ranked.map((entry) => entry.provider),
+    ["retry"]
   );
-  assert.deepEqual(ranked.map((entry) => entry.provider), ["retry"]);
 });

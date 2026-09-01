@@ -31,8 +31,8 @@
 
 ### ⚠️ Breaking Changes
 
-- Known hard context or operator practical-input limits are dispatch barriers; targets that
-  exceed them no longer remain as fallback candidates. Unknown limits remain eligible.
+- Operator practical-input limits are dispatch barriers; targets that exceed an explicit
+  local policy no longer remain as fallback candidates. Static catalog context remains advisory.
 - Auto routing now returns an explicit unavailable response when no healthy/capable target
   exists instead of re-admitting an incompatible fallback target.
 

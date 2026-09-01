@@ -541,7 +541,6 @@ const HARD_COMPAT_REASONS = new Set([
   "vision",
   "structured_output",
   "output_tokens",
-  "context_window",
   "practical_input_limit",
 ]);
 
@@ -617,10 +616,7 @@ function getTargetCompatibilityFailures(
   }
 
   const practicalInputLimit = getPracticalModelInputLimit(target.modelStr);
-  if (
-    practicalInputLimit !== null &&
-    requirements.estimatedInputTokens > practicalInputLimit
-  ) {
+  if (practicalInputLimit !== null && requirements.estimatedInputTokens > practicalInputLimit) {
     failures.push("practical_input_limit");
   }
 
@@ -722,9 +718,9 @@ export function filterTargetsByRequestCompatibility(
       `requiredContextTokens=${requirements.requiredContextTokens}`
   );
 
-  // Verified hard context limits and operator-configured practical limits are
-  // dispatch barriers. Unknown limits remain eligible; operators can override a
-  // stale hard catalog value through the existing exact model context override.
+  // Static context metadata is advisory so compression and the final budget
+  // gate can handle stale catalog values. Operator practical limits are an
+  // explicit local policy and remain hard dispatch barriers.
   const compatible = targets.filter((target) => {
     const reasons = targetReasons.get(target) || [];
     return !reasons.some((reason) => HARD_COMPAT_REASONS.has(reason));
@@ -749,10 +745,8 @@ export function filterTargetsByRequestCompatibility(
   if (compatible.length === targets.length) return targets;
   if (compatible.length === 0) {
     const hardRejected = rejected.some((entry) => hasHardCapabilityFailure(entry.reasons));
-    const knownLimitRejected = rejected.some((entry) =>
-      entry.reasons.some((reason) =>
-        reason === "context_window" || reason === "practical_input_limit"
-      )
+    const practicalLimitRejected = rejected.some((entry) =>
+      entry.reasons.includes("practical_input_limit")
     );
     const failOpen = options?.failOpen === true;
 
@@ -785,9 +779,9 @@ export function filterTargetsByRequestCompatibility(
       return visionSafe;
     }
 
-    // Unknown limits fail open, but a known hard/practical incompatibility must
-    // never be resurrected just because it would otherwise empty the pool.
-    if (!hardRejected || (failOpen && !knownLimitRejected)) {
+    // Static catalog context is advisory. An explicit operator practical limit
+    // is hard policy and must not be resurrected when it empties the pool.
+    if (!hardRejected || (failOpen && !practicalLimitRejected)) {
       log.warn(
         "COMBO",
         `${label}: all ${targets.length} targets were filtered by request requirements; preserving strategy order`

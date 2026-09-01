@@ -196,24 +196,12 @@ export async function resolveAutoStrategyOrder(
       );
       eligibleTargets = filteredByContext;
     } else {
-      return {
-        earlyResponse: errorResponseWithComboDiagnostics(
-          400,
-          `No auto strategy candidate has a known context window large enough for approximately ${estimatedInputTokens} input tokens`,
-          {
-            poolSize: eligibleTargets.length,
-            attempted: 0,
-            excluded: eligibleTargets.map((target) => ({
-              provider: target.provider,
-              model: target.modelStr,
-              reason: "context_window",
-            })),
-            attemptOrder: [],
-            terminalReason: "capability_mismatch",
-          },
-          { code: "context_length_exceeded", type: "invalid_request_error" }
-        ),
-      };
+      // Static context metadata is advisory at this early routing stage. The
+      // compression/final budget pipeline is authoritative after dispatch.
+      log.warn(
+        "COMBO",
+        `Auto strategy: all candidates exceed the approximate context estimate (${estimatedInputTokens} tokens); preserving the eligible pool`
+      );
     }
   }
 
@@ -502,7 +490,7 @@ export async function resolveAutoStrategyOrder(
       .join(", ");
     log.info(
       "COMBO",
-      `Routing decision | task=${capabilityDecision.requestType} | required=${capabilityDecision.requiredCapabilities.join(",") || "none"} | rejected=${rejected || "none"} | selected=${selectedTarget?.modelStr || `${selectedProvider}/${selectedModel}`} | reason=${selectionReason}`
+      `Auto selection: ${selectedTarget?.modelStr || `${selectedProvider}/${selectedModel}`} | intent=${intent} task=${taskType} | strategy=${routingStrategy} | ${selectionReason} | routingTask=${capabilityDecision.requestType} | required=${capabilityDecision.requiredCapabilities.join(",") || "none"} | rejected=${rejected || "none"}`
     );
   } else {
     return {

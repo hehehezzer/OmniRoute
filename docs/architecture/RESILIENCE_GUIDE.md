@@ -271,13 +271,13 @@ timeouts remain separate post-dispatch controls. The default is 15000ms; overrid
 
 ### Hard and practical input limits
 
-Combo pre-dispatch compatibility rejects a candidate when the request exceeds a
-known hard `max_input_tokens`/context window. Unknown limits remain eligible.
-Operators may set the separate exact model override
+Static catalog `max_input_tokens` and context-window estimates are advisory at
+pre-dispatch time so compression and the final request-budget gate can handle
+stale provider metadata. Operators may set the separate exact model override
 `practical_input_tokens` in **Settings → Model Overrides** for a conservative
 local operating threshold (for example, a free or sharply rate-limited account
-that is technically capable of more). This value is policy, not a provider
-guarantee; it is unset by default and never inferred from a provider name.
+that is technically capable of more). This explicit local policy is a hard
+dispatch barrier; it is unset by default and never inferred from a provider name.
 
 ### Bounded combo lifecycle
 
