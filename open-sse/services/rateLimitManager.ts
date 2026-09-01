@@ -28,8 +28,8 @@ import {
 } from "./rateLimitManager/headers";
 import { checkQueueAdmission } from "./rateLimitManager/admission";
 import {
+  LEGACY_RATE_LIMIT_QUEUE_TIMEOUT_CODE,
   markLocalRateLimitError,
-  RATE_LIMIT_EXECUTION_TIMEOUT_CODE,
   RATE_LIMIT_QUEUE_WEDGED_CODE,
 } from "./rateLimitManager/errors";
 import { LimiterWedgeWatchdog, WATCHDOG_INTERVAL_MS } from "./rateLimitManager/wedgeWatchdog";
@@ -544,10 +544,6 @@ function getLimiter(provider, connectionId, model = null) {
  * @returns {Promise<unknown>} Result of fn()
  */
 export async function withRateLimit(provider, connectionId, model, fn, signal = null) {
-  if (!enabledConnections.has(connectionId)) {
-    return fn();
-  }
-
   if (signal?.aborted) {
     const reason = signal.reason;
     if (reason instanceof Error) throw reason;
@@ -556,18 +552,51 @@ export async function withRateLimit(provider, connectionId, model, fn, signal = 
     throw err;
   }
 
+  if (!enabledConnections.has(connectionId)) {
+    return fn();
+  }
+
   // Proactive sliding-window fallback for header-less providers with a declared cap
   // (Fase 8.2). No-op unless PROVIDER_DEFAULT_RATE_LIMITS has an entry for `provider`.
   const maxWaitMs = resolveRequestQueueMaxWaitMs(provider, undefined, connectionId);
   await awaitProviderDefaultSlot(provider, connectionId, signal, maxWaitMs);
 
   const limiter = getLimiter(provider, connectionId, model);
-  // Bottleneck's `expiration` starts only after a job leaves QUEUED. The
-  // legacy maxWaitMs setting therefore bounds limiter-managed execution; it
-  // is not a queue-wait deadline.
-  const executionExpirationMs = maxWaitMs;
-  const scheduleOpts =
-    executionExpirationMs && executionExpirationMs > 0 ? { expiration: executionExpirationMs } : {};
+  // `maxWaitMs` is a queue-admission deadline. Do not pass it to Bottleneck's
+  // `expiration`: Bottleneck starts that timer only after dispatch, which used
+  // to kill legitimate large-context executions after 15s. Provider/target/
+  // combo deadlines remain the explicit post-dispatch bounds.
+  let started = false;
+  let queueExpired = false;
+  // Bottleneck v2 has no supported per-job queue removal API. Keep the actual
+  // request closure in a detachable slot so abort/queue-timeout can release a
+  // potentially very large prompt immediately even if Bottleneck retains the
+  // tiny guard callback until its turn reaches the front of the queue.
+  let pendingWork: (() => Promise<unknown>) | null = fn;
+  const guardedFn = async () => {
+    started = true;
+    if (queueExpired) {
+      throw markLocalRateLimitError(
+        new Error(`Local rate-limit queue wait exceeded ${maxWaitMs}ms before dispatch`),
+        LEGACY_RATE_LIMIT_QUEUE_TIMEOUT_CODE
+      );
+    }
+    if (signal?.aborted) {
+      const reason = signal.reason;
+      if (reason instanceof Error) throw reason;
+      const error = new Error(typeof reason === "string" ? reason : "The operation was aborted");
+      error.name = "AbortError";
+      throw error;
+    }
+    const work = pendingWork;
+    pendingWork = null;
+    if (!work) {
+      const error = new Error("The queued request was cancelled before dispatch");
+      error.name = "AbortError";
+      throw error;
+    }
+    return work();
+  };
 
   // Issue #6593: opt-in admission cap — fast-reject before Bottleneck's
   // schedule() (and before any downstream compression/prompt work runs) when
@@ -610,46 +639,64 @@ export async function withRateLimit(provider, connectionId, model, fn, signal = 
         signal.addEventListener("abort", abortListener, { once: true });
       }
 
+      let queueTimer: ReturnType<typeof setTimeout> | undefined;
+      const queueTimeoutPromise = new Promise<never>((_, reject) => {
+        if (!(maxWaitMs > 0)) return;
+        queueTimer = setTimeout(() => {
+          if (started) return;
+          queueExpired = true;
+          reject(
+            markLocalRateLimitError(
+              new Error(`Local rate-limit queue wait exceeded ${maxWaitMs}ms before dispatch`),
+              LEGACY_RATE_LIMIT_QUEUE_TIMEOUT_CODE
+            )
+          );
+        }, maxWaitMs);
+        queueTimer.unref?.();
+      });
+
       try {
         // Race the work against the abort signal. When abort wins, fn is still
         // running inside Bottleneck's limiter — its eventual rejection must not
         // surface as an unhandledRejection. The .catch(noop) silences only the
         // orphaned branch; the real rejection comes from abortPromise.
-        const scheduled = limiter.schedule(scheduleOpts, fn);
+        const scheduled = limiter.schedule(guardedFn);
         scheduled.catch(() => {}); // prevent unhandledRejection when abort wins
         abortPromise.catch(() => {}); // prevent unhandledRejection when scheduled wins
-        return await Promise.race([scheduled, abortPromise]);
+        queueTimeoutPromise.catch(() => {});
+        return await Promise.race([scheduled, abortPromise, queueTimeoutPromise]);
       } finally {
+        if (queueTimer) clearTimeout(queueTimer);
         if (abortListener) {
           signal.removeEventListener("abort", abortListener);
         }
       }
     } else {
-      return await limiter.schedule(scheduleOpts, fn);
+      let queueTimer: ReturnType<typeof setTimeout> | undefined;
+      const scheduled = limiter.schedule(guardedFn);
+      scheduled.catch(() => {});
+      const queueTimeoutPromise = new Promise<never>((_, reject) => {
+        if (!(maxWaitMs > 0)) return;
+        queueTimer = setTimeout(() => {
+          if (started) return;
+          queueExpired = true;
+          reject(
+            markLocalRateLimitError(
+              new Error(`Local rate-limit queue wait exceeded ${maxWaitMs}ms before dispatch`),
+              LEGACY_RATE_LIMIT_QUEUE_TIMEOUT_CODE
+            )
+          );
+        }, maxWaitMs);
+        queueTimer.unref?.();
+      });
+      queueTimeoutPromise.catch(() => {});
+      try {
+        return await Promise.race([scheduled, queueTimeoutPromise]);
+      } finally {
+        if (queueTimer) clearTimeout(queueTimer);
+      }
     }
   } catch (err) {
-    // Only Bottleneck-owned failures are rewritten. Application code can throw
-    // the same text and must retain its original identity and semantics.
-    if (
-      err instanceof Bottleneck.BottleneckError &&
-      /^This job timed out after \d+ ms\.$/.test(err.message)
-    ) {
-      const key = getLimiterKey(provider, connectionId, model);
-      logRateLimit(
-        `⏰ [RATE-LIMIT] ${key} — limiter-managed execution expired after ${Math.ceil((executionExpirationMs || 0) / 1000)}s`
-      );
-      throw markLocalRateLimitError(
-        new Error(
-          `Request exceeded OmniRoute's local rate-limit execution expiration ` +
-            `(legacy resilienceSettings.requestQueue.maxWaitMs=${executionExpirationMs}ms) for ` +
-            `${model ? `${provider}/${model}` : provider}. Bottleneck applies this deadline only ` +
-            `after dispatch; it does not bound queue wait and is not an upstream-generated timeout.`,
-          { cause: err }
-        ),
-        RATE_LIMIT_EXECUTION_TIMEOUT_CODE
-      );
-    }
-
     if (
       err instanceof Bottleneck.BottleneckError &&
       err.message === "rate-limit-watchdog-wedge-reset"
@@ -677,6 +724,8 @@ export async function withRateLimit(provider, connectionId, model, fn, signal = 
       throw markLocalRateLimitError(wedgeErr, RATE_LIMIT_QUEUE_WEDGED_CODE);
     }
     throw err;
+  } finally {
+    pendingWork = null;
   }
 }
 

@@ -1,13 +1,9 @@
 /**
- * #4165 — classify Bottleneck's execution expiration accurately.
+ * Queue/dispatch timeout separation regression coverage.
  *
- * OmniRoute passes the legacy `requestQueue.maxWaitMs` value to Bottleneck as
- * the job `expiration`. Bottleneck starts that timer only after a job leaves
- * QUEUED, so it bounds limiter-managed execution and does not bound queue wait.
- *
- * The raw Bottleneck message (`This job timed out after <N> ms.`) still needs an
- * OmniRoute-owned code and message so it cannot masquerade as an upstream-
- * generated timeout. The original error remains available as `.cause`.
+ * requestQueue.maxWaitMs is retained as a persisted compatibility key, but it
+ * now bounds only time spent waiting for a Bottleneck slot. Provider, target,
+ * and combo deadlines own post-dispatch execution.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -15,22 +11,28 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const TEST_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-rl-execution-timeout-"));
+const TEST_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-rl-queue-timeout-"));
 process.env.DATA_DIR = TEST_DATA_DIR;
 
-// Dynamic imports are required because DATA_DIR must be set before DB modules evaluate.
 const core = await import("../../src/lib/db/core.ts");
 const resilienceSettings = await import("../../src/lib/resilience/settings.ts");
 const rateLimitManager = await import("../../open-sse/services/rateLimitManager.ts");
-const { getClientSafeLocalRateLimitError, getTrustedLocalRateLimitError } =
+const { getTrustedLocalRateLimitError } =
   await import("../../open-sse/services/rateLimitManager/errors.ts");
-const { formatProviderError } = await import("../../open-sse/utils/error.ts");
 
-// This contract test deliberately drives Bottleneck's real expiration timer.
 function wait(ms: number) {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, ms);
-  return promise;
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+async function configure(maxWaitMs: number) {
+  await rateLimitManager.applyRequestQueueSettings({
+    ...resilienceSettings.DEFAULT_RESILIENCE_SETTINGS.requestQueue,
+    autoEnableApiKeyProviders: false,
+    concurrentRequests: 1,
+    requestsPerMinute: 100000,
+    minTimeBetweenRequestsMs: 0,
+    maxWaitMs,
+  });
 }
 
 test.afterEach(async () => {
@@ -42,88 +44,126 @@ test.after(() => {
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
 });
 
-// Drive a real Bottleneck execution expiration with a function that outlives it.
-async function triggerExecutionExpiration() {
-  await rateLimitManager.applyRequestQueueSettings({
-    ...resilienceSettings.DEFAULT_RESILIENCE_SETTINGS.requestQueue,
-    autoEnableApiKeyProviders: false,
-    concurrentRequests: 1,
-    requestsPerMinute: 100000,
-    minTimeBetweenRequestsMs: 0,
-    maxWaitMs: 40,
-  });
-  rateLimitManager.enableRateLimitProtection("conn-execution-timeout");
-
-  return rateLimitManager.withRateLimit("openai", "conn-execution-timeout", "gpt-4o", async () => {
-    await wait(400); // > maxWaitMs (40ms) → Bottleneck fails the job
-    return "should-not-reach";
-  });
-}
-
-test("#4165 execution expiration is local and accurately named", async () => {
-  let caught: (Error & { code?: string; cause?: { message?: string } }) | undefined;
-  try {
-    await triggerExecutionExpiration();
-    assert.fail("expected the limiter-managed execution to expire");
-  } catch (err) {
-    caught = err as Error & { code?: string; cause?: { message?: string } };
-  }
-  assert.ok(caught, "an error should have been thrown");
-
-  assert.equal(
-    caught.code,
-    "RATE_LIMIT_EXECUTION_TIMEOUT",
-    "error must carry the local execution-expiration code"
-  );
-
-  assert.match(caught.message, /execution expiration/i);
-  assert.match(caught.message, /does not bound queue wait/i);
-  assert.match(
-    caught.message,
-    /not an upstream-generated timeout/i,
-    "message should explicitly disclaim an upstream-generated timeout"
-  );
-  assert.doesNotMatch(
-    caught.message,
-    /This job timed out/,
-    "raw Bottleneck/upstream-looking string must not leak into the surfaced message"
-  );
-
-  // The original Bottleneck error is preserved for debugging.
-  assert.ok(caught.cause, "original error should be preserved as cause");
-  assert.match(String(caught.cause?.message ?? ""), /This job timed out/);
-
-  assert.deepEqual(getTrustedLocalRateLimitError(caught), {
-    code: "RATE_LIMIT_EXECUTION_TIMEOUT",
-    status: 504,
-  });
-  const safeError = getClientSafeLocalRateLimitError(caught);
-  assert.ok(safeError);
-  const clientMessage = formatProviderError(safeError, "openai", "gpt-4o", 504);
-  assert.match(clientMessage, /execution expiration/i);
-  assert.doesNotMatch(
-    clientMessage,
-    /This job timed out/,
-    "client and call-log formatting must not append the retained Bottleneck cause"
-  );
-});
-
-test("#4165 a job that completes within the execution expiration is unaffected", async () => {
-  await rateLimitManager.applyRequestQueueSettings({
-    ...resilienceSettings.DEFAULT_RESILIENCE_SETTINGS.requestQueue,
-    autoEnableApiKeyProviders: false,
-    concurrentRequests: 1,
-    requestsPerMinute: 100000,
-    minTimeBetweenRequestsMs: 0,
-    maxWaitMs: 5000,
-  });
-  rateLimitManager.enableRateLimitProtection("conn-fast");
+test("maxWaitMs does not expire work after dispatch", async () => {
+  await configure(40);
+  rateLimitManager.enableRateLimitProtection("conn-long-execution");
 
   const result = await rateLimitManager.withRateLimit(
     "openai",
-    "conn-fast",
+    "conn-long-execution",
     "gpt-4o",
-    async () => "ok"
+    async () => {
+      await wait(120);
+      return "completed";
+    }
   );
-  assert.equal(result, "ok");
+
+  assert.equal(result, "completed");
+});
+
+test("a pre-aborted unprotected request never invokes provider work", async () => {
+  const controller = new AbortController();
+  controller.abort(new Error("parent cancelled"));
+  let executed = false;
+  await assert.rejects(
+    rateLimitManager.withRateLimit(
+      "openai",
+      "conn-without-protection",
+      "gpt-4o",
+      async () => {
+        executed = true;
+        return "unexpected";
+      },
+      controller.signal
+    ),
+    /parent cancelled/
+  );
+  assert.equal(executed, false);
+});
+
+test("maxWaitMs rejects only queued work and never dispatches it later", async () => {
+  await configure(40);
+  rateLimitManager.enableRateLimitProtection("conn-queue-timeout");
+
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const first = rateLimitManager.withRateLimit(
+    "openai",
+    "conn-queue-timeout",
+    "gpt-4o",
+    async () => {
+      await firstGate;
+      return "first";
+    }
+  );
+
+  await wait(15);
+  let secondExecuted = false;
+  await assert.rejects(
+    rateLimitManager.withRateLimit(
+      "openai",
+      "conn-queue-timeout",
+      "gpt-4o",
+      async () => {
+        secondExecuted = true;
+        return "second";
+      }
+    ),
+    (error: Error & { code?: string }) => {
+      assert.equal(error.code, "RATE_LIMIT_QUEUE_TIMEOUT");
+      assert.match(error.message, /queue wait exceeded/i);
+      assert.deepEqual(getTrustedLocalRateLimitError(error), {
+        code: "RATE_LIMIT_QUEUE_TIMEOUT",
+        status: 503,
+      });
+      return true;
+    }
+  );
+
+  releaseFirst();
+  assert.equal(await first, "first");
+  await wait(40);
+  assert.equal(secondExecuted, false, "expired queued work must never call the provider");
+});
+
+test("an aborted queued job never dispatches after capacity returns", async () => {
+  await configure(5_000);
+  rateLimitManager.enableRateLimitProtection("conn-abort-queue");
+
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const first = rateLimitManager.withRateLimit(
+    "openai",
+    "conn-abort-queue",
+    "gpt-4o",
+    async () => {
+      await firstGate;
+      return "first";
+    }
+  );
+  await wait(15);
+
+  const controller = new AbortController();
+  let secondExecuted = false;
+  const second = rateLimitManager.withRateLimit(
+    "openai",
+    "conn-abort-queue",
+    "gpt-4o",
+    async () => {
+      secondExecuted = true;
+      return "second";
+    },
+    controller.signal
+  );
+  controller.abort();
+  await assert.rejects(second, (error: Error) => error.name === "AbortError");
+
+  releaseFirst();
+  assert.equal(await first, "first");
+  await wait(40);
+  assert.equal(secondExecuted, false);
 });

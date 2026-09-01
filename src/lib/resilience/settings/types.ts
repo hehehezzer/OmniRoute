@@ -19,8 +19,9 @@ export interface RequestQueueSettings {
   /** Whole-process upstream concurrency cap. Zero disables the global gate. */
   globalConcurrentRequests: number;
   /**
-   * Legacy persisted key used as Bottleneck's post-dispatch execution
-   * expiration. It does not bound time spent in Bottleneck's QUEUED state.
+   * Maximum time a request may remain in the local rate-limit queue before
+   * dispatch. Kept under the legacy persisted name for compatibility. It is
+   * never reused as a post-dispatch execution deadline.
    */
   maxWaitMs: number;
   /**
