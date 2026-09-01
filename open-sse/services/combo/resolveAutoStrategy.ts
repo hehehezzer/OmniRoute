@@ -23,6 +23,7 @@ import {
   classifyRequestCapabilities,
   isExecutionRequest,
 } from "../autoCombo/capabilityRequirements.ts";
+import { orderEligibleCandidatesByPreference } from "../autoCombo/routingEnvelope.ts";
 import { getTaskFitness } from "../autoCombo/taskFitness.ts";
 import { buildComplexityRoutingHint } from "../autoCombo/complexityRouter";
 import { getModePack } from "../autoCombo/modePacks.ts";
@@ -87,6 +88,7 @@ export interface ResolveAutoStrategyDeps {
     budgetCap?: number | null;
     /** Per-request X-OmniRoute-Budget-Fallback value ("cheapest" | "strict") — #3470. */
     budgetFallback?: "cheapest" | "strict" | null;
+    routingEnvelope?: import("../autoCombo/routingEnvelope.ts").RoutingPreferenceEnvelope | null;
   } | null;
   resilienceSettings: ResilienceSettings;
   log: ComboLogger;
@@ -212,10 +214,18 @@ export async function resolveAutoStrategyOrder(
   recordComboIntent(combo.name, intent);
   const taskType = mapIntentToTaskType(intent);
   const capabilityDecision = classifyRequestCapabilities(prompt);
+  const externalRouting = relayOptions?.routingEnvelope ?? null;
+  const requiredCapabilities = [
+    ...new Set([
+      ...capabilityDecision.requiredCapabilities,
+      ...(externalRouting?.requiredCapabilities ?? []),
+    ]),
+  ];
   const candidateRequirements: CandidateRequirements = {
     taskType,
     estimatedInputTokens,
-    requiredCapabilities: capabilityDecision.requiredCapabilities,
+    minimumContextTokens: externalRouting?.minimumContext ?? undefined,
+    requiredCapabilities,
   };
 
   const {
@@ -299,10 +309,14 @@ export async function resolveAutoStrategyOrder(
   for (const candidate of candidates) {
     candidate.cacheAffinity = cacheAffinityScores.get(promptCacheTargetIdentity(candidate)) ?? 0;
   }
-  const routableCandidates = filterEligibleCapableCandidates(
+  const eligibleCandidates = filterEligibleCapableCandidates(
     candidates,
     candidateRequirements,
     getTaskFitness
+  );
+  const routableCandidates = orderEligibleCandidatesByPreference(
+    eligibleCandidates,
+    externalRouting?.preferredCandidates ?? []
   );
   const blockedCount = candidates.length - routableCandidates.length;
   if (blockedCount > 0) {
@@ -359,7 +373,20 @@ export async function resolveAutoStrategyOrder(
     let selectedConnectionId: string | null = null;
     let selectionReason = "";
 
-    if (routingStrategy !== "rules") {
+    const preferredCandidate = routableCandidates.find((candidate) =>
+      (externalRouting?.preferredCandidates ?? [])
+        .map((entry) => entry.toLowerCase())
+        .includes(`${candidate.provider}/${candidate.model}`.toLowerCase())
+    );
+
+    if (preferredCandidate) {
+      selectedProvider = preferredCandidate.provider;
+      selectedModel = preferredCandidate.model;
+      selectedConnectionId = preferredCandidate.connectionId ?? null;
+      selectionReason = "first eligible external preference";
+    }
+
+    if (!selectedProvider && routingStrategy !== "rules") {
       try {
         const decision = selectWithStrategy(
           routableCandidates,
@@ -451,6 +478,22 @@ export async function resolveAutoStrategyOrder(
       candidateRequirements
     );
     const rankedTargets = scoredTargets.map((entry) => entry.target);
+    const preferredTargetOrder = new Map(
+      (externalRouting?.preferredCandidates ?? []).map((candidate, index) => [
+        candidate.toLowerCase(),
+        index,
+      ])
+    );
+    rankedTargets.sort((left, right) => {
+      const leftParsed = parseModel(left.modelStr);
+      const rightParsed = parseModel(right.modelStr);
+      const leftId = `${left.provider}/${leftParsed.model || left.modelStr}`.toLowerCase();
+      const rightId = `${right.provider}/${rightParsed.model || right.modelStr}`.toLowerCase();
+      return (
+        (preferredTargetOrder.get(leftId) ?? Number.POSITIVE_INFINITY) -
+        (preferredTargetOrder.get(rightId) ?? Number.POSITIVE_INFINITY)
+      );
+    });
     const selectedTarget =
       scoredTargets.find((entry) => {
         const parsed = parseModel(entry.target.modelStr);
@@ -490,7 +533,7 @@ export async function resolveAutoStrategyOrder(
       .join(", ");
     log.info(
       "COMBO",
-      `Auto selection: ${selectedTarget?.modelStr || `${selectedProvider}/${selectedModel}`} | intent=${intent} task=${taskType} | strategy=${routingStrategy} | ${selectionReason} | routingTask=${capabilityDecision.requestType} | required=${capabilityDecision.requiredCapabilities.join(",") || "none"} | rejected=${rejected || "none"}`
+      `Auto selection: ${selectedTarget?.modelStr || `${selectedProvider}/${selectedModel}`} | intent=${intent} task=${taskType} | strategy=${routingStrategy} | ${selectionReason} | routingTask=${capabilityDecision.requestType} | required=${requiredCapabilities.join(",") || "none"} | rejected=${rejected || "none"}`
     );
   } else {
     return {

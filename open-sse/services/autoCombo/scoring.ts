@@ -166,6 +166,8 @@ export interface ScoredProvider {
 export interface CandidateRequirements {
   taskType: string;
   estimatedInputTokens?: number;
+  /** Explicit client requirement. Unknown practical limits fail closed when set. */
+  minimumContextTokens?: number;
   minTaskFitness?: number;
   /** Hard execution capability requirements derived from the request before ranking. */
   requiredCapabilities?: readonly ExecutionCapability[];
@@ -249,6 +251,16 @@ export function evaluateCandidateEligibility(
   if (failureRate >= 0.5) return reject("recent_failures");
 
   const estimatedInputTokens = Number(requirements.estimatedInputTokens ?? 0);
+  const minimumContextTokens = Number(requirements.minimumContextTokens ?? 0);
+  if (Number.isFinite(minimumContextTokens) && minimumContextTokens > 0) {
+    if (
+      typeof candidate.maxInputTokens !== "number" ||
+      candidate.maxInputTokens <= 0 ||
+      candidate.maxInputTokens < minimumContextTokens
+    ) {
+      return reject("context_limit");
+    }
+  }
   if (
     Number.isFinite(estimatedInputTokens) &&
     estimatedInputTokens > 0 &&

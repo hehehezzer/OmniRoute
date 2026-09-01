@@ -29,6 +29,24 @@ export type ExecutionCapability =
   | "reasoning"
   | "long_context";
 
+const EXECUTION_CAPABILITIES: ReadonlySet<string> = new Set<ExecutionCapability>([
+  "browser",
+  "filesystem",
+  "shell",
+  "git",
+  "code_editing",
+  "code_execution",
+  "code_analysis",
+  "repository_access",
+  "sandbox_write",
+  "reasoning",
+  "long_context",
+]);
+
+export function isExecutionCapability(value: string): value is ExecutionCapability {
+  return EXECUTION_CAPABILITIES.has(value);
+}
+
 export type SandboxCapability = "none" | "read_only" | "workspace_write" | "full_access";
 
 export interface ProviderExecutionCapabilities {

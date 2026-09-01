@@ -161,3 +161,72 @@ test("repository execution fails with sanitized capability diagnostics when no r
     assert.equal(body?.diagnostics?.excluded?.[0]?.reason, "missing_filesystem");
   }
 });
+
+test("enhanced preferred ordering skips exhausted candidates and dispatches the next eligible preference", async () => {
+  const luna = {
+    ...candidate("codex", "luna", 1),
+    availability: "quota_exhausted" as const,
+    quotaRemaining: 0,
+    stepId: "luna",
+    executionKey: "luna-key",
+    modelStr: "codex/luna",
+    maxInputTokens: 128_000,
+  };
+  const sol = {
+    ...candidate("codex", "sol", 5),
+    availability: "available" as const,
+    stepId: "sol",
+    executionKey: "sol-key",
+    modelStr: "codex/sol",
+    maxInputTokens: 128_000,
+  };
+  const result = await resolveAutoStrategyOrder({
+    orderedTargets: [
+      {
+        stepId: "luna",
+        executionKey: "luna-key",
+        kind: "model",
+        provider: "codex",
+        modelStr: "codex/luna",
+      },
+      {
+        stepId: "sol",
+        executionKey: "sol-key",
+        kind: "model",
+        provider: "codex",
+        modelStr: "codex/sol",
+      },
+    ] as never,
+    body: { messages: [{ role: "user", content: "Explain this change" }] },
+    combo: {
+      id: "preference-test",
+      name: "preference-test",
+      config: { candidatePool: ["codex"] },
+    } as never,
+    settings: null,
+    config: {},
+    relayOptions: {
+      routingEnvelope: {
+        schemaVersion: 1,
+        requiredCapabilities: [],
+        minimumContext: 120_000,
+        preferredCandidates: ["codex/luna", "codex/sol"],
+        preferenceMode: "balanced",
+        taskProfileId: null,
+        routingPolicyVersion: null,
+      },
+    },
+    resilienceSettings: { quotaPreflight: { enabled: false } } as never,
+    log: { info() {}, warn() {}, debug() {} } as never,
+    buildAutoCandidates: (async () => [luna, sol]) as never,
+  });
+
+  assert.ok("orderedTargets" in result);
+  if ("orderedTargets" in result) {
+    assert.equal(result.orderedTargets[0]?.modelStr, "codex/sol");
+    assert.equal(
+      result.orderedTargets.some((target) => target.modelStr === "codex/luna"),
+      false
+    );
+  }
+});

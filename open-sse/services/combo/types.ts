@@ -9,6 +9,7 @@
 import type { CompressionExclusions } from "../compression/exclusions.ts";
 import type { ProviderCandidate } from "../autoCombo/scoring.ts";
 import type { PerTargetAdmissionHook } from "../admission/types.ts";
+import type { RoutingPreferenceEnvelope } from "../autoCombo/routingEnvelope.ts";
 
 export const RESET_WINDOW_NAMES = ["weekly", "session", "monthly"] as const;
 
@@ -84,6 +85,8 @@ export type ComboRelayOptions = {
   budgetCap?: number | null;
   /** Per-request X-OmniRoute-Budget-Fallback value ("cheapest" | "strict") — #3470. */
   budgetFallback?: "cheapest" | "strict" | null;
+  /** Validated, provider-stripped additive routing metadata. */
+  routingEnvelope?: RoutingPreferenceEnvelope | null;
   [key: string]: unknown;
 };
 

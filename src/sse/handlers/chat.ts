@@ -40,6 +40,7 @@ import {
 import type { ComboLike, SingleModelTarget } from "@omniroute/open-sse/services/combo/types.ts";
 import { mergeAbortSignals } from "@omniroute/open-sse/executors/base.ts";
 import { resolveRequestAutoControls } from "@omniroute/open-sse/services/autoCombo/requestControls.ts";
+import { extractRoutingPreferenceEnvelope } from "@omniroute/open-sse/services/autoCombo/routingEnvelope.ts";
 import { isVerifiedNativeCodexRequest } from "@omniroute/open-sse/config/codexIdentity.ts";
 import { resolveCompressionSettings } from "@omniroute/open-sse/handlers/chatCore/compressionSettings.ts";
 import type { CompressionExclusions } from "@omniroute/open-sse/services/compression/exclusions.ts";
@@ -386,6 +387,20 @@ async function handleChatImplementation(
   // downstream mapper (Anthropic / Gemini / xAI / Responses). An explicit client
   // reasoning_effort / reasoning / object-shaped thinking always wins (backward compatible).
   body = normalizeReasoningRequest(body);
+
+  // The additive routing envelope is consumed only by OmniRoute. Validate and
+  // remove it before guardrails, hooks, translators, logs, or provider dispatch
+  // can observe it. Requests without this extension remain byte-for-byte
+  // compatible with the standard path.
+  let routingEnvelope = null;
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const extractedRouting = extractRoutingPreferenceEnvelope(body as Record<string, unknown>);
+    if (!extractedRouting.success) {
+      return errorResponse(HTTP_STATUS.BAD_REQUEST, extractedRouting.message);
+    }
+    body = extractedRouting.body;
+    routingEnvelope = extractedRouting.envelope;
+  }
 
   const sourceFormat = detectFormatFromUrl(body, request.url);
 
@@ -1022,6 +1037,7 @@ async function handleChatImplementation(
       ...(combo.strategy === "context-relay" ? { config: relayConfig } : {}),
       ...(bypassProviderQuotaPolicy ? { bypassProviderQuotaPolicy: true } : {}),
       ...perRequestAutoControls,
+      ...(routingEnvelope ? { routingEnvelope } : {}),
     };
     telemetry.endPhase();
 
