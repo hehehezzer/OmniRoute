@@ -82,6 +82,20 @@ test("canonical-id noauth model is usable with NO stored row", async () => {
   assert.equal(usable, true);
 });
 
+test("disabled noauth provider is NOT usable instead of falling back to synthetic noauth", async () => {
+  await resetStorage();
+  await providersDb.createProviderConnection({
+    provider: "cloudflare-playground",
+    authType: "no-auth",
+    name: "disabled-playground",
+    isActive: false,
+    testStatus: "unknown",
+  });
+
+  const usable = await hasUsableCredentialsForModel("cfp/moonshotai/kimi-k2.7-code");
+  assert.equal(usable, false, "explicitly disabled noauth providers must be excluded");
+});
+
 // ── noauth terminal-status blocking ─────────────────────────────────────────
 
 test("noauth provider is NOT usable when a row carries a terminal status", async () => {

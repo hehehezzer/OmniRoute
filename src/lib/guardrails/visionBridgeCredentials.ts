@@ -106,9 +106,16 @@ export async function hasUsableCredentialsForModel(model: string): Promise<boole
     const { getProviderConnections } = await loadProvidersModule();
     const connections = await getProviderConnections({ provider, isActive: true });
     if (!Array.isArray(connections)) return null;
-    // Empty active set: keyed providers are definitively unusable; no-auth
-    // providers still work through the synthetic "noauth" connection.
-    if (connections.length === 0) return isNoAuth;
+    // A no-auth provider with no stored row uses its synthetic "noauth"
+    // connection. An explicitly disabled row must *not* be treated as that
+    // synthetic fallback: the Vision Bridge would otherwise select the
+    // disabled provider and fail at dispatch with a misleading 401.
+    if (connections.length === 0) {
+      if (!isNoAuth) return false;
+      const allConnections = await getProviderConnections({ provider });
+      if (!Array.isArray(allConnections)) return null;
+      return allConnections.length === 0;
+    }
     // No-auth rows store no API key (authType "noauth" + empty apiKey would
     // fail the generic key check) — only a terminal status blocks them.
     if (isNoAuth) {
