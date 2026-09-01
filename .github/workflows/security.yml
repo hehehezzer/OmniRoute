@@ -2,9 +2,9 @@ name: Security checks
 
 on:
   pull_request:
-    branches: [main, "release/**"]
+    branches: [main, "release/**", "release-prep/**"]
   push:
-    branches: [main, "release/**"]
+    branches: [main, "release/**", "release-prep/**"]
   workflow_dispatch:
 
 permissions:

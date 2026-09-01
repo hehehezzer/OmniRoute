@@ -1,0 +1,86 @@
+name: Quattro compatibility
+
+on:
+  pull_request:
+    branches: [main, "release/**", "release-prep/**"]
+  push:
+    branches: [main, "release/**", "release-prep/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quattro-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DISABLE_SQLITE_AUTO_BACKUP: "true"
+  JWT_SECRET: ci-quattro-secret-with-sufficient-length-for-validation
+  API_KEY_SECRET: ci-quattro-api-key-secret-long
+  OMNIROUTE_SKIP_SYSTEM_TRUST: "1"
+
+jobs:
+  enhanced-routing:
+    name: Enhanced routing compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - name: Lint and typecheck
+        run: |
+          npm run lint
+          npm run typecheck:core
+          npm run typecheck:noimplicit:core
+      - name: Fork-specific compatibility tests
+        run: >-
+          node --import tsx/esm --import ./open-sse/utils/setupPolyfill.ts
+          --import ./tests/_setup/isolateDataDir.ts --test --test-force-exit
+          tests/unit/autoCombo/routing-envelope.test.ts
+          tests/unit/api/quattro-routing-metadata.test.ts
+          tests/unit/combo/capability-aware-routing.test.ts
+          tests/unit/combo/cheapest-capable-selection.test.ts
+          tests/unit/combo-context-window-filter.test.ts
+          tests/unit/rate-limit-execution-timeout-message-4165.test.ts
+      - name: Integration tests
+        run: npm run test:integration
+      - name: Production build
+        run: npm run build
+
+  security:
+    name: Fork security and secret checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=critical
+      - run: npm run check:secrets
+      - run: npm run check:public-creds
+      - run: npm run test:security
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: omniroute-quattro-ci:test
