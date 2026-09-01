@@ -209,6 +209,41 @@ The Auto-Combo Engine dynamically selects the best provider/model for each reque
 
 **Sum:** `0.1429 + 0.1605 + 0.1429 + 0.1143 + 0.0762 + (7 × 0.0476) + 0.00 + 0.00 + 0.03 = 1.0` as declared in `DEFAULT_WEIGHTS`; user-configured weights are renormalized into a distribution by `normalizeScoringWeights()` before scoring.
 
+## Capability-Aware Execution Routing
+
+Auto routing first classifies the request, then applies hard provider capability
+requirements before health, tier, or cost ranking. This prevents a cheap or
+high-scoring browser-only provider from receiving work that requires a local
+repository execution environment.
+
+| Request type           | Required capabilities                                                                                |
+| :--------------------- | :--------------------------------------------------------------------------------------------------- |
+| `conversation`         | none                                                                                                 |
+| `research`             | `browser`                                                                                            |
+| `coding`               | `code_analysis`                                                                                      |
+| `repository_execution` | `filesystem`, `shell`, `git`, `code_editing`, `code_execution`, `repository_access`, `sandbox_write` |
+| `infrastructure`       | `filesystem`, `shell`, `code_execution`, `repository_access`, `sandbox_write`                        |
+| `security`             | `filesystem`, `code_analysis`, `repository_access`                                                   |
+| `document_generation`  | none                                                                                                 |
+
+The static registry in `open-sse/services/autoCombo/capabilityRequirements.ts`
+declares the provider/model execution surface. `chatgpt-web/*` and other
+browser-backed providers are deliberately web-only: they can serve conversation
+and research, but cannot satisfy repository or infrastructure requests. `codex/*`
+declares a workspace-write execution surface. Code-oriented routes without a
+verified local execution adapter (including `cursor/*` and `codex-app-server/*`)
+remain chat-only until their adapter proves equivalent capabilities at dispatch.
+Providers not explicitly registered are chat-only for execution purposes, so a new
+provider cannot accidentally receive repository work.
+
+When no candidate satisfies an execution request, OmniRoute returns HTTP 503
+with `"No compatible execution provider available"` and sanitized combo
+diagnostics listing the rejected provider/model capability reason. Successful
+auto decisions log the request type, required capabilities, capability
+rejections, selected route, and selection reason. Capability filters remain in
+effect for fallback ordering; cost/quality can only rank candidates that passed
+them.
+
 ## Mode Packs
 
 Four pre-defined weight profiles in `open-sse/services/autoCombo/modePacks.ts`. Each pack overrides the default weights to bias selection toward a specific goal. Below are the **full weight tables per pack** (each row sums to 1.0).

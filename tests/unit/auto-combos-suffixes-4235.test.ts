@@ -68,9 +68,9 @@ test("#4235 tierToWeightVariant maps tiers to scoring profiles", () => {
   assert.equal(suffix.tierToWeightVariant(undefined), undefined);
 });
 
-test("#4235 buildAutoCandidateFilter only filters when a constraint applies", () => {
-  // coding/chat with no tier → no narrowing
-  assert.equal(suffix.buildAutoCandidateFilter("coding", undefined), null);
+test("#4235 buildAutoCandidateFilter enforces capability-bearing categories", () => {
+  // Coding is now a real capability requirement; chat remains unconstrained.
+  assert.equal(typeof suffix.buildAutoCandidateFilter("coding", undefined), "function");
   assert.equal(suffix.buildAutoCandidateFilter("chat", undefined), null);
   // category constraints (vision/reasoning/multimodal) and tier constraints (free/pro) → a filter fn
   assert.equal(typeof suffix.buildAutoCandidateFilter("vision", undefined), "function");

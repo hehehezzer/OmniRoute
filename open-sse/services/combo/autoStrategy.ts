@@ -32,10 +32,8 @@ import { filterChatSelectableModels } from "../modelEndpointPolicy.ts";
 import { DEFAULT_INTENT_CONFIG, type IntentClassifierConfig } from "../intentClassifier.ts";
 import { getTaskFitness } from "../autoCombo/taskFitness.ts";
 import {
-  calculateFactors,
-  calculateScore,
-  computePoolMaxima,
-  type ProviderCandidate,
+  rankCheapestCapable,
+  type CandidateRequirements,
   type ScoringWeights,
 } from "../autoCombo/scoring.ts";
 import type { RoutingHint } from "../manifestAdapter";
@@ -61,13 +59,8 @@ export const QUOTA_SOFT_DEPRIORITIZE_FACTOR = Number(
   process.env.QUOTA_SOFT_DEPRIORITIZE_FACTOR ?? "0.7"
 );
 
-// #4540: Status soft-deprioritization factor.
-// When the quota-preflight HARD cutoff is OFF (default), a candidate whose connection
-// is in a terminal/transient unavailable status (credits_exhausted / rate_limited /
-// banned / expired / future-dated unavailable) is NOT hard-blocked — instead its
-// auto-combo score is multiplied by this factor so an exhausted provider ranks strictly
-// below an otherwise-identical healthy one, without surfacing a misleading 429.
-// Override via STATUS_SOFT_DEPRIORITIZE_FACTOR env var (range 0..1, default 0.5).
+// Deprecated compatibility export. Terminal/transient connection states are now
+// hard eligibility failures; a score multiplier cannot make an unavailable target usable.
 export const STATUS_SOFT_DEPRIORITIZE_FACTOR = Number(
   process.env.STATUS_SOFT_DEPRIORITIZE_FACTOR ?? "0.5"
 );
@@ -354,18 +347,30 @@ export function scoreAutoTargets(
   candidates: AutoProviderCandidate[],
   taskType: string | null,
   weights: ScoringWeights,
-  manifestHint?: RoutingHint | null
+  manifestHint?: RoutingHint | null,
+  requirements?: CandidateRequirements
 ) {
   const targetByExecutionKey = new Map(targets.map((target) => [target.executionKey, target]));
-  const activeCandidates = candidates.filter((candidate) => candidate.quotaCutoffBlocked !== true);
-  // Computed once per scoring pass, not per candidate — see computePoolMaxima's
-  // doc comment (scoring.ts) for the O(n^2) OOM this avoids on large auto-combo
-  // candidate pools (#OOM incident, zero-config auto combo expanding to 1000s
-  // of provider/model targets).
-  const poolMaxima = computePoolMaxima(activeCandidates as unknown as ProviderCandidate[]);
+  const ranked = rankCheapestCapable(
+    candidates,
+    { ...requirements, taskType: taskType ?? "default" },
+    weights,
+    getTaskFitness,
+    manifestHint
+  );
+  const candidateByIdentity = new Map(
+    candidates.map((candidate) => [
+      `${candidate.provider}\0${candidate.model}\0${candidate.connectionId ?? ""}`,
+      candidate,
+    ])
+  );
 
-  return activeCandidates
-    .map((candidate) => {
+  return ranked
+    .map((scored) => {
+      const candidate = candidateByIdentity.get(
+        `${scored.provider}\0${scored.model}\0${scored.connectionId ?? ""}`
+      );
+      if (!candidate) return null;
       const baseTarget =
         targetByExecutionKey.get(candidate.executionKey) ||
         targets.find(
@@ -383,32 +388,17 @@ export function scoreAutoTargets(
         provider: candidate.provider,
         connectionId: candidate.connectionId ?? baseTarget.connectionId,
       };
-      const factors = calculateFactors(
-        candidate as ProviderCandidate,
-        activeCandidates as unknown as ProviderCandidate[],
-        taskType ?? "general",
-        getTaskFitness,
-        manifestHint ?? undefined,
-        poolMaxima
-      );
-      let score = calculateScore(factors, weights);
+      let score = scored.score;
       // B17: Quota Share soft-policy deprioritization
       if ("quotaSoftPenalty" in candidate && candidate.quotaSoftPenalty === true) {
         score *= QUOTA_SOFT_DEPRIORITIZE_FACTOR;
-      }
-      // #4540: terminal/transient connection status soft penalty (no hard block).
-      // A no-fetcher exhausted provider keeps quotaRemaining=100, so without this its
-      // score would tie a healthy provider's. The penalty pushes it strictly below.
-      if ("statusPenalty" in candidate && candidate.statusPenalty === true) {
-        score *= STATUS_SOFT_DEPRIORITIZE_FACTOR;
       }
       return {
         target,
         score,
       };
     })
-    .filter((entry): entry is { target: ResolvedComboTarget; score: number } => entry !== null)
-    .sort((a, b) => b.score - a.score);
+    .filter((entry): entry is { target: ResolvedComboTarget; score: number } => entry !== null);
 }
 
 /**

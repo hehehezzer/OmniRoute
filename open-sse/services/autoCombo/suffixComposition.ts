@@ -19,6 +19,7 @@
 import type { AutoVariant } from "./autoPrefix";
 import { classifyTier } from "../tierResolver";
 import { getResolvedModelCapabilities } from "@/lib/modelCapabilities";
+import { getTaskFitnessWithSource } from "./taskFitness";
 import { isVisionModelId } from "@/shared/constants/visionModels";
 import { isVisionBridgeForcedModel } from "@/shared/constants/visionBridgeDefaults";
 
@@ -159,6 +160,15 @@ export function buildAutoCandidateFilter(
       } catch {
         return false;
       }
+    });
+  }
+  if (category === "coding") {
+    checks.push((c) => {
+      const fitness = getTaskFitnessWithSource(c.model, "coding");
+      // A wildcard/name-only boost is not capability evidence. DB overrides,
+      // observed arena performance, models.dev metadata, inherited benchmark
+      // evidence, and the curated versioned table are accepted.
+      return fitness.source !== "wildcard_boost" && fitness.score >= 0.65;
     });
   }
   if (tier === "free") {

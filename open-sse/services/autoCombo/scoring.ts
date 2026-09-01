@@ -7,6 +7,11 @@
 import type { RoutingHint } from "../manifestAdapter";
 import { clamp01 } from "../../utils/number";
 import { classifyTier } from "../tierResolver";
+import {
+  getProviderExecutionCapabilities,
+  missingRequiredCapabilities,
+  type ExecutionCapability,
+} from "./capabilityRequirements.ts";
 
 export interface ScoringFactors {
   quota: number;
@@ -127,6 +132,27 @@ export interface ProviderCandidate {
   quality?: number;
   connectionPoolSize?: number;
   connectionId?: string;
+  /**
+   * Runtime availability supplied by the connection/health layer. `retry` is
+   * the only non-healthy state that may remain eligible, and only when
+   * retryEligible is explicitly true (for example a half-open breaker probe).
+   */
+  availability?:
+    | "available"
+    | "retry"
+    | "unavailable"
+    | "rate_limited"
+    | "quota_exhausted"
+    | "cooldown"
+    | "unhealthy";
+  retryEligible?: boolean;
+  /** Auto-combo connection status/quota gates populated by buildAutoCandidates. */
+  statusPenalty?: boolean;
+  statusPenaltyReason?: string;
+  quotaCutoffBlocked?: boolean;
+  quotaCutoffReason?: string;
+  /** Optional practical input ceiling for direct scorer consumers. */
+  maxInputTokens?: number | null;
 }
 
 export interface ScoredProvider {
@@ -135,6 +161,181 @@ export interface ScoredProvider {
   score: number;
   factors: ScoringFactors;
   connectionId?: string;
+}
+
+export interface CandidateRequirements {
+  taskType: string;
+  estimatedInputTokens?: number;
+  minTaskFitness?: number;
+  /** Hard execution capability requirements derived from the request before ranking. */
+  requiredCapabilities?: readonly ExecutionCapability[];
+}
+
+export interface CandidateEligibility {
+  eligible: boolean;
+  reason: string | null;
+  taskFitness: number;
+}
+
+const DEFAULT_CAPABILITY_FLOORS: Readonly<Record<string, number>> = {
+  simple: 0.45,
+  default: 0.45,
+  general: 0.45,
+  documentation: 0.45,
+  coding: 0.65,
+  code: 0.65,
+  analysis: 0.7,
+  reasoning: 0.7,
+  planning: 0.7,
+  review: 0.7,
+  debugging: 0.7,
+};
+
+/** Capability is a requirement floor, not a reason to pick the strongest model. */
+export function capabilityFloorForTask(taskType: string): number {
+  return DEFAULT_CAPABILITY_FLOORS[taskType.toLowerCase()] ?? 0.5;
+}
+
+/**
+ * Hard eligibility gate shared by every auto-combo selector.
+ *
+ * A weighted score must never resurrect an unavailable connection. HALF_OPEN
+ * remains eligible because the circuit breaker explicitly selected it for a
+ * recovery probe; OPEN, cooldown, exhausted quota, terminal connection status,
+ * missing OAuth session capacity, and sustained majority failure are rejected.
+ */
+export function evaluateCandidateEligibility(
+  candidate: ProviderCandidate,
+  requirements: CandidateRequirements,
+  getTaskFitness: (model: string, taskType: string) => number
+): CandidateEligibility {
+  const taskType = requirements.taskType || "default";
+  const taskFitness = clamp01(getTaskFitness(candidate.model, taskType));
+  const requiredCapabilities = requirements.requiredCapabilities || [];
+  const missingCapabilities = missingRequiredCapabilities(
+    getProviderExecutionCapabilities(candidate.provider, candidate.model),
+    requiredCapabilities
+  );
+  const reject = (reason: string): CandidateEligibility => ({
+    eligible: false,
+    reason,
+    taskFitness,
+  });
+
+  if (missingCapabilities.length > 0) {
+    return reject(`missing_${missingCapabilities[0]}`);
+  }
+  if (candidate.quotaCutoffBlocked === true) {
+    return reject(candidate.quotaCutoffReason || "quota_cutoff");
+  }
+  if (candidate.statusPenalty === true) {
+    return reject(candidate.statusPenaltyReason || "connection_unavailable");
+  }
+  if (candidate.circuitBreakerState === "OPEN") return reject("circuit_open");
+  if (
+    candidate.availability &&
+    candidate.availability !== "available" &&
+    !(candidate.availability === "retry" && candidate.retryEligible === true)
+  ) {
+    return reject(candidate.availability);
+  }
+  if (candidate.quotaTotal > 0 && candidate.quotaRemaining <= 0) {
+    return reject("quota_exhausted");
+  }
+  if ((candidate.sessionAvailability ?? 1) <= 0) {
+    return reject("session_unavailable");
+  }
+  const failureRate = clamp01(candidate.failureRate ?? candidate.errorRate);
+  if (failureRate >= 0.5) return reject("recent_failures");
+
+  const estimatedInputTokens = Number(requirements.estimatedInputTokens ?? 0);
+  if (
+    Number.isFinite(estimatedInputTokens) &&
+    estimatedInputTokens > 0 &&
+    typeof candidate.maxInputTokens === "number" &&
+    candidate.maxInputTokens > 0 &&
+    estimatedInputTokens > candidate.maxInputTokens
+  ) {
+    return reject("context_window");
+  }
+
+  const floor = requirements.minTaskFitness ?? capabilityFloorForTask(taskType);
+  if (taskFitness < floor) return reject("capability_mismatch");
+  return { eligible: true, reason: null, taskFitness };
+}
+
+export function filterEligibleCapableCandidates<T extends ProviderCandidate>(
+  pool: T[],
+  requirements: CandidateRequirements,
+  getTaskFitness: (model: string, taskType: string) => number
+): T[] {
+  return pool.filter(
+    (candidate) => evaluateCandidateEligibility(candidate, requirements, getTaskFitness).eligible
+  );
+}
+
+function finiteCost(candidate: ProviderCandidate): number {
+  return Number.isFinite(candidate.costPer1MTokens) && candidate.costPer1MTokens >= 0
+    ? candidate.costPer1MTokens
+    : Number.POSITIVE_INFINITY;
+}
+
+function finiteLatency(candidate: ProviderCandidate): number {
+  return Number.isFinite(candidate.p95LatencyMs) && candidate.p95LatencyMs >= 0
+    ? candidate.p95LatencyMs
+    : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Rank the cheapest candidate that clears the hard availability and capability
+ * gates. Cost is intentionally lexicographic; latency, observed reliability,
+ * and the existing weighted score only break equal-cost ties.
+ */
+export function rankCheapestCapable(
+  pool: ProviderCandidate[],
+  requirements: CandidateRequirements,
+  weights: ScoringWeights = DEFAULT_WEIGHTS,
+  getTaskFitness: (model: string, taskType: string) => number = () => 0.5,
+  manifestHint?: RoutingHint | null
+): ScoredProvider[] {
+  const eligible = filterEligibleCapableCandidates(pool, requirements, getTaskFitness);
+  if (eligible.length === 0) return [];
+  const maxima = computePoolMaxima(eligible);
+  return eligible
+    .map((candidate, index) => {
+      const factors = calculateFactors(
+        candidate,
+        eligible,
+        requirements.taskType,
+        getTaskFitness,
+        manifestHint,
+        maxima
+      );
+      return {
+        candidate,
+        index,
+        scored: {
+          provider: candidate.provider,
+          model: candidate.model,
+          score: calculateScore(factors, weights),
+          factors,
+          connectionId: candidate.connectionId,
+        } satisfies ScoredProvider,
+      };
+    })
+    .sort((left, right) => {
+      const cost = finiteCost(left.candidate) - finiteCost(right.candidate);
+      if (cost !== 0) return cost;
+      const latency = finiteLatency(left.candidate) - finiteLatency(right.candidate);
+      if (latency !== 0) return latency;
+      const reliability =
+        clamp01(left.candidate.failureRate ?? left.candidate.errorRate) -
+        clamp01(right.candidate.failureRate ?? right.candidate.errorRate);
+      if (reliability !== 0) return reliability;
+      if (right.scored.score !== left.scored.score) return right.scored.score - left.scored.score;
+      return left.index - right.index;
+    })
+    .map((entry) => entry.scored);
 }
 
 /**

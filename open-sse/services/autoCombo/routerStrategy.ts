@@ -10,8 +10,8 @@
  *   - LKGPStrategy: tries last known good provider first
  */
 
-import type { ProviderCandidate, ScoredProvider } from "./scoring.ts";
-import { scorePool } from "./scoring.ts";
+import type { CandidateRequirements, ProviderCandidate, ScoredProvider } from "./scoring.ts";
+import { filterEligibleCapableCandidates, rankCheapestCapable } from "./scoring.ts";
 import { getTaskFitness } from "./taskFitness.ts";
 import { clamp01 } from "../../utils/number.ts";
 import { rankBySpeed } from "./speedRanking.ts";
@@ -29,6 +29,7 @@ export interface RoutingContext {
   requestHasTools?: boolean;
   requestHasVision?: boolean;
   estimatedInputTokens?: number;
+  capabilityRequirements?: CandidateRequirements;
   lastKnownGoodProvider?: string;
   lkgpEnabled?: boolean;
   sla?: SlaRoutingPolicy;
@@ -87,10 +88,13 @@ class RulesStrategyImpl implements RouterStrategy {
   readonly description = "15-factor weighted scoring (see DEFAULT_WEIGHTS)";
 
   select(pool: ProviderCandidate[], context: RoutingContext): RoutingDecision {
-    const eligible = pool.filter((c) => c.circuitBreakerState !== "OPEN");
-    const ranked: ScoredProvider[] = scorePool(
-      eligible.length > 0 ? eligible : pool,
-      context.taskType,
+    const ranked: ScoredProvider[] = rankCheapestCapable(
+      pool,
+      {
+        ...context.capabilityRequirements,
+        taskType: context.taskType,
+        estimatedInputTokens: context.estimatedInputTokens,
+      },
       undefined,
       getTaskFitness
     );
@@ -115,8 +119,15 @@ class CostStrategyImpl implements RouterStrategy {
   readonly description = "Always selects cheapest available provider (by costPer1MTokens)";
 
   select(pool: ProviderCandidate[], _context: RoutingContext): RoutingDecision {
-    const healthy = pool.filter((c) => c.circuitBreakerState !== "OPEN");
-    const candidates = healthy.length > 0 ? healthy : pool;
+    const candidates = filterEligibleCapableCandidates(
+      pool,
+      {
+        ..._context.capabilityRequirements,
+        taskType: _context.taskType,
+        estimatedInputTokens: _context.estimatedInputTokens,
+      },
+      getTaskFitness
+    );
     const sorted = [...candidates].sort((a, b) => a.costPer1MTokens - b.costPer1MTokens);
     const best = sorted[0];
     if (!best) throw new Error("[CostStrategy] No candidates available");
@@ -140,7 +151,16 @@ class LatencyStrategyImpl implements RouterStrategy {
     "Prioritizes the fastest reliable provider-model pair using TTFT, TPS, E2E latency, health, fail rate, and stability";
 
   select(pool: ProviderCandidate[], _context: RoutingContext): RoutingDecision {
-    const ranked = rankBySpeed(pool.map(toSpeedCandidate));
+    const eligible = filterEligibleCapableCandidates(
+      pool,
+      {
+        ..._context.capabilityRequirements,
+        taskType: _context.taskType,
+        estimatedInputTokens: _context.estimatedInputTokens,
+      },
+      getTaskFitness
+    );
+    const ranked = rankBySpeed(eligible.map(toSpeedCandidate));
     const winner = ranked[0];
     if (!winner) {
       throw new Error("[LatencyStrategy] No candidates available after speed ranking");
@@ -238,8 +258,15 @@ class SLAStrategyImpl implements RouterStrategy {
     "Selects the provider most likely to satisfy latency, error-rate, and cost SLOs";
 
   select(pool: ProviderCandidate[], context: RoutingContext): RoutingDecision {
-    const healthy = pool.filter((c) => c.circuitBreakerState !== "OPEN");
-    const candidates = healthy.length > 0 ? healthy : pool;
+    const candidates = filterEligibleCapableCandidates(
+      pool,
+      {
+        ...context.capabilityRequirements,
+        taskType: context.taskType,
+        estimatedInputTokens: context.estimatedInputTokens,
+      },
+      getTaskFitness
+    );
     if (candidates.length === 0) throw new Error("[SLAStrategy] No candidates available");
 
     const maxCost = Math.max(...candidates.map((c) => c.costPer1MTokens), 0.001);
@@ -309,26 +336,60 @@ class LKGPStrategyImpl implements RouterStrategy {
       return getStrategy("rules").select(pool, context);
     }
 
+    const ranked = rankCheapestCapable(
+      pool,
+      {
+        ...context.capabilityRequirements,
+        taskType: context.taskType,
+        estimatedInputTokens: context.estimatedInputTokens,
+      },
+      undefined,
+      getTaskFitness
+    );
+    if (ranked.length === 0) throw new Error("[LKGPStrategy] No eligible capable candidates");
+    const candidateByIdentity = new Map(
+      pool.map((candidate) => [
+        `${candidate.provider}\0${candidate.model}\0${candidate.connectionId ?? ""}`,
+        candidate,
+      ])
+    );
+    const costOf = (candidate: ScoredProvider) =>
+      candidateByIdentity.get(
+        `${candidate.provider}\0${candidate.model}\0${candidate.connectionId ?? ""}`
+      )?.costPer1MTokens ?? Number.POSITIVE_INFINITY;
+    const cheapestCost = costOf(ranked[0]);
+    const cheapestBand = ranked.filter(
+      (candidate) =>
+        Math.abs(costOf(candidate) - cheapestCost) <= Math.max(1e-9, Math.abs(cheapestCost) * 0.001)
+    );
+
     if (context.lastKnownGoodProvider) {
-      const candidates = pool.filter(
-        (c) => c.provider === context.lastKnownGoodProvider && c.circuitBreakerState !== "OPEN"
+      const best = cheapestBand.find(
+        (candidate) => candidate.provider === context.lastKnownGoodProvider
       );
-      if (candidates.length > 0) {
-        const best = candidates[0];
+      if (best) {
         return {
           provider: best.provider,
           model: best.model,
           strategy: this.name,
           reason: `LKGP: using last known good provider ${best.provider}`,
           candidatesConsidered: 1,
-          finalScore: 1.0,
+          finalScore: best.score,
           connectionId: best.connectionId,
         };
       }
     }
 
-    // Fallback to rules strategy
-    return getStrategy("rules").select(pool, context);
+    const best = ranked[0];
+    return {
+      provider: best.provider,
+      model: best.model,
+      strategy: this.name,
+      reason: `LKGP: last-known-good was not in the cheapest capable band; selected cost-optimal ${best.provider}`,
+      candidatesConsidered: ranked.length,
+      finalScore: best.score,
+      connectionId: best.connectionId,
+    };
   }
 }
 

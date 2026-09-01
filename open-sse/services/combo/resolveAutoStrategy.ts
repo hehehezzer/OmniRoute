@@ -3,13 +3,27 @@ import {
   unavailableResponse,
   errorResponseWithComboDiagnostics,
 } from "../../utils/error.ts";
-import { BudgetExceededError, selectProvider as selectAutoProvider } from "../autoCombo/engine.ts";
+import {
+  BudgetExceededError,
+  NoEligibleCandidateError,
+  selectProvider as selectAutoProvider,
+} from "../autoCombo/engine.ts";
 import {
   resolveRequestModePack,
   parseRequestBudgetCap,
   parseRequestBudgetFallback,
 } from "../autoCombo/requestControls.ts";
 import { selectWithStrategy } from "../autoCombo/routerStrategy.ts";
+import {
+  evaluateCandidateEligibility,
+  filterEligibleCapableCandidates,
+  type CandidateRequirements,
+} from "../autoCombo/scoring.ts";
+import {
+  classifyRequestCapabilities,
+  isExecutionRequest,
+} from "../autoCombo/capabilityRequirements.ts";
+import { getTaskFitness } from "../autoCombo/taskFitness.ts";
 import { buildComplexityRoutingHint } from "../autoCombo/complexityRouter";
 import { getModePack } from "../autoCombo/modePacks.ts";
 import { recordComboIntent } from "../comboMetrics.ts";
@@ -156,6 +170,8 @@ export async function resolveAutoStrategyOrder(
     }
   }
 
+  eligibleTargets = await expandAutoComboCandidatePool(eligibleTargets, combo);
+
   // Context-window pre-filter (#1808)
   // Estimate input tokens once; exclude candidates whose known context limit is too small.
   // Uses the same 4-chars-per-token heuristic as contextManager.ts::compressContext().
@@ -180,13 +196,25 @@ export async function resolveAutoStrategyOrder(
       );
       eligibleTargets = filteredByContext;
     } else {
-      log.warn(
-        "COMBO",
-        `Auto strategy: all candidates filtered by approximate context-window policy (est. ${estimatedInputTokens} tokens), falling back to full pool`
-      );
+      return {
+        earlyResponse: errorResponseWithComboDiagnostics(
+          400,
+          `No auto strategy candidate has a known context window large enough for approximately ${estimatedInputTokens} input tokens`,
+          {
+            poolSize: eligibleTargets.length,
+            attempted: 0,
+            excluded: eligibleTargets.map((target) => ({
+              provider: target.provider,
+              model: target.modelStr,
+              reason: "context_window",
+            })),
+            attemptOrder: [],
+            terminalReason: "capability_mismatch",
+          },
+          { code: "context_length_exceeded", type: "invalid_request_error" }
+        ),
+      };
     }
-
-    eligibleTargets = await expandAutoComboCandidatePool(eligibleTargets, combo);
   }
 
   const prompt = extractPromptForIntent(body);
@@ -195,6 +223,12 @@ export async function resolveAutoStrategyOrder(
   const intent = classifyWithConfig(prompt, intentConfig, systemPrompt);
   recordComboIntent(combo.name, intent);
   const taskType = mapIntentToTaskType(intent);
+  const capabilityDecision = classifyRequestCapabilities(prompt);
+  const candidateRequirements: CandidateRequirements = {
+    taskType,
+    estimatedInputTokens,
+    requiredCapabilities: capabilityDecision.requiredCapabilities,
+  };
 
   const {
     routingStrategy,
@@ -277,23 +311,57 @@ export async function resolveAutoStrategyOrder(
   for (const candidate of candidates) {
     candidate.cacheAffinity = cacheAffinityScores.get(promptCacheTargetIdentity(candidate)) ?? 0;
   }
-  const routableCandidates = candidates.filter(
-    (candidate) => candidate.quotaCutoffBlocked !== true
+  const routableCandidates = filterEligibleCapableCandidates(
+    candidates,
+    candidateRequirements,
+    getTaskFitness
   );
-  const quotaBlockedCount = candidates.length - routableCandidates.length;
-  if (quotaBlockedCount > 0) {
+  const blockedCount = candidates.length - routableCandidates.length;
+  if (blockedCount > 0) {
     log.info(
       "COMBO",
-      `Auto strategy: quota cutoff skipped ${quotaBlockedCount}/${candidates.length} account candidates`
+      `Auto strategy: eligibility/capability gates skipped ${blockedCount}/${candidates.length} account candidates`
     );
   }
   // G2: Register candidates so chatCore can mark quotaSoftPenalty via setCandidateQuotaSoftPenalty.
   _registerExecutionCandidates(routableCandidates);
-  if (candidates.length > 0 && routableCandidates.length === 0) {
+  if (routableCandidates.length === 0) {
+    const allQuotaBlocked =
+      candidates.length > 0 &&
+      candidates.every((candidate) => candidate.quotaCutoffBlocked === true);
+    const exclusions = candidates.map((candidate) => ({
+      provider: candidate.provider,
+      model: candidate.model,
+      reason:
+        evaluateCandidateEligibility(candidate, candidateRequirements, getTaskFitness).reason ||
+        "ineligible",
+    }));
+    const capabilityBlocked = exclusions.some((entry) => entry.reason.startsWith("missing_"));
+    if (
+      isExecutionRequest(capabilityDecision.requestType) &&
+      (candidates.length === 0 || capabilityBlocked)
+    ) {
+      return {
+        earlyResponse: errorResponseWithComboDiagnostics(
+          503,
+          "No compatible execution provider available",
+          {
+            poolSize: candidates.length,
+            attempted: 0,
+            excluded: exclusions,
+            attemptOrder: [],
+            terminalReason: "capability_mismatch",
+          },
+          { code: "capability_mismatch", type: "service_unavailable_error" }
+        ),
+      };
+    }
     return {
       earlyResponse: unavailableResponse(
-        429,
-        "All auto strategy candidates are below configured quota cutoffs"
+        allQuotaBlocked ? 429 : 503,
+        allQuotaBlocked
+          ? "All auto strategy candidates are below configured quota cutoffs"
+          : "No healthy auto strategy candidate satisfies the request requirements"
       ),
     };
   }
@@ -318,6 +386,7 @@ export async function resolveAutoStrategyOrder(
             lkgpEnabled: (settings as { lkgpEnabled?: unknown } | null | undefined)?.lkgpEnabled as
               boolean | undefined,
             estimatedInputTokens,
+            capabilityRequirements: candidateRequirements,
             sla: slaPolicy,
           },
           routingStrategy
@@ -351,7 +420,9 @@ export async function resolveAutoStrategyOrder(
             explorationRate,
           },
           routableCandidates,
-          taskType
+          taskType,
+          undefined,
+          candidateRequirements
         );
       } catch (err) {
         // #3470: `budgetFallback: "strict"` refuses to select when every candidate
@@ -359,6 +430,9 @@ export async function resolveAutoStrategyOrder(
         // instead of letting it propagate as an unhandled 500.
         if (err instanceof BudgetExceededError) {
           return { earlyResponse: errorResponse(402, err.message) };
+        }
+        if (err instanceof NoEligibleCandidateError) {
+          return { earlyResponse: unavailableResponse(503, err.message) };
         }
         throw err;
       }
@@ -385,7 +459,8 @@ export async function resolveAutoStrategyOrder(
       routableCandidates,
       taskType,
       weights,
-      autoManifestHint
+      autoManifestHint,
+      candidateRequirements
     );
     const rankedTargets = scoredTargets.map((entry) => entry.target);
     const selectedTarget =
@@ -397,9 +472,7 @@ export async function resolveAutoStrategyOrder(
           modelId === selectedModel &&
           (!selectedConnectionId || entry.target.connectionId === selectedConnectionId)
         );
-      })?.target ||
-      rankedTargets[0] ||
-      eligibleTargets[0];
+      })?.target || rankedTargets[0];
     if (!selectedTarget) {
       return {
         earlyResponse: unavailableResponse(
@@ -409,22 +482,35 @@ export async function resolveAutoStrategyOrder(
       };
     }
 
-    // Keep eligibleTargets as the last-resort fallback tail: dedupe drops the
-    // routable ranked ones (and, when the cutoff is OFF, makes this identical to
-    // the pre-cutoff behavior), but a quota-blocked target still survives as a
-    // final fallback instead of vanishing — the hard cutoff only de-prioritizes.
+    // Fallbacks must remain inside the same hard eligibility/capability pool.
+    // Re-appending eligibleTargets here used to resurrect rate-limited, quota-
+    // exhausted, circuit-open, and capability-mismatched candidates.
     orderedTargets = dedupeTargetsByExecutionKey(
-      [selectedTarget, ...rankedTargets, ...eligibleTargets].filter(
+      [selectedTarget, ...rankedTargets].filter(
         (entry): entry is ResolvedComboTarget => entry !== undefined && entry !== null
       )
     );
 
+    const rejected = candidates
+      .map((candidate) => ({
+        candidate,
+        reason: evaluateCandidateEligibility(candidate, candidateRequirements, getTaskFitness)
+          .reason,
+      }))
+      .filter((entry) => entry.reason)
+      .map((entry) => `${entry.candidate.provider}/${entry.candidate.model}:${entry.reason}`)
+      .join(", ");
     log.info(
       "COMBO",
-      `Auto selection: ${selectedTarget?.modelStr || `${selectedProvider}/${selectedModel}`} | intent=${intent} task=${taskType} | strategy=${routingStrategy} | ${selectionReason}`
+      `Routing decision | task=${capabilityDecision.requestType} | required=${capabilityDecision.requiredCapabilities.join(",") || "none"} | rejected=${rejected || "none"} | selected=${selectedTarget?.modelStr || `${selectedProvider}/${selectedModel}`} | reason=${selectionReason}`
     );
   } else {
-    log.warn("COMBO", "Auto strategy has no candidates, keeping default ordering");
+    return {
+      earlyResponse: unavailableResponse(
+        503,
+        "No healthy auto strategy candidate satisfies the request requirements"
+      ),
+    };
   }
 
   return { orderedTargets, autoUsedExplicitRouter };

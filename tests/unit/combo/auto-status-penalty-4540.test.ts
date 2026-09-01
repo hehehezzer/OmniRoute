@@ -2,10 +2,9 @@
 // Regression for #4540: an exhausted provider connection (e.g. credits_exhausted /
 // rate_limited with no numeric quota fetcher) used to score IDENTICALLY to a healthy
 // one — quotaRemaining defaulted to 100 and testStatus never entered scoring — so auto
-// routing kept picking dead providers. With the quota-preflight hard cutoff DISABLED
-// (the default), we must NOT hard-block such a candidate (that would surface a misleading
-// "below quota cutoff" 429); instead a SOFT status penalty must rank it strictly BELOW
-// an otherwise-identical healthy candidate.
+// routing kept picking dead providers. A score penalty is not enough: a connection
+// explicitly marked unavailable must be excluded before ranking even when the optional
+// quota-percentage cutoff is disabled.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scoreAutoTargets } from "../../../open-sse/services/combo/autoStrategy.ts";
@@ -69,33 +68,20 @@ function candidate(
   } as AutoProviderCandidate;
 }
 
-test("#4540: exhausted (statusPenalty) candidate scores strictly BELOW an identical healthy one without being hard-blocked", () => {
+test("#4540: exhausted (statusPenalty) candidate is ineligible before ranking", () => {
   const targets = [target("dead", "m", "dead-conn"), target("healthy", "m", "healthy-conn")];
   const ranked = scoreAutoTargets(
     targets,
     [
       // Exhausted connection with no numeric quota fetcher: quotaRemaining stays 100,
-      // but the connection terminal status flags a soft penalty (NOT a hard block).
+      // but the connection terminal status is still a hard availability signal.
       candidate("dead", "m", "dead-conn", { statusPenalty: true }),
       candidate("healthy", "m", "healthy-conn"),
     ],
-    "coding",
+    "default",
     quotaOnlyWeights
   );
 
-  // Soft penalty: NOT hard-blocked — both candidates are still in the pool.
-  assert.equal(ranked.length, 2, "soft penalty must not drop the exhausted candidate");
-
-  const dead = ranked.find((e) => e.target.provider === "dead");
-  const healthy = ranked.find((e) => e.target.provider === "healthy");
-  assert.ok(dead && healthy, "both candidates present");
-
-  // The fix: exhausted scores STRICTLY less than the identical healthy one (was a tie).
-  assert.ok(
-    (dead!.score as number) < (healthy!.score as number),
-    `exhausted score (${dead!.score}) must be strictly < healthy score (${healthy!.score})`
-  );
-
-  // And ranking puts healthy first.
+  assert.equal(ranked.length, 1, "unavailable candidates must not survive hard filtering");
   assert.equal(ranked[0]?.target.provider, "healthy");
 });

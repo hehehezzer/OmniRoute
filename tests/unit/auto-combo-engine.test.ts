@@ -32,7 +32,7 @@ test.afterEach(() => {
   Math.random = originalRandom;
 });
 
-test("selectProvider infers coding intent from prompt messages when taskType is generic", () => {
+test("selectProvider does not let a legacy model label override current coding capability evidence", () => {
   const candidates = [
     {
       provider: "codex",
@@ -69,8 +69,8 @@ test("selectProvider infers coding intent from prompt messages when taskType is 
     },
   ]);
 
-  assert.equal(result.provider, "codex");
-  assert.equal(result.model, "gpt-5.1-codex");
+  assert.equal(result.provider, "openai");
+  assert.equal(result.model, "gpt-4o-mini");
   assert.equal(result.isExploration, false);
 });
 

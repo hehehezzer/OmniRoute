@@ -10,11 +10,11 @@
  */
 
 import {
-  scorePool,
-  DEFAULT_WEIGHTS,
+  rankCheapestCapable,
   normalizeScoringWeights,
   type ScoringWeights,
   type ProviderCandidate,
+  type CandidateRequirements,
   type ScoredProvider,
 } from "./scoring";
 import { getTaskFitness } from "./taskFitness";
@@ -60,6 +60,13 @@ export class BudgetExceededError extends Error {
         `(cheapest available candidate costs $${cheapestCostUsd.toFixed(4)})`
     );
     this.name = "BudgetExceededError";
+  }
+}
+
+export class NoEligibleCandidateError extends Error {
+  constructor(message = "No healthy candidate satisfies the request capability requirements") {
+    super(message);
+    this.name = "NoEligibleCandidateError";
   }
 }
 
@@ -218,7 +225,8 @@ export function selectProvider(
   config: AutoComboConfig,
   candidates: ProviderCandidate[],
   taskType: string = "default",
-  promptMessages?: Array<{ role: string; content: unknown }>
+  promptMessages?: Array<{ role: string; content: unknown }>,
+  requirements?: CandidateRequirements
 ): SelectionResult {
   const healer = getSelfHealingManager();
 
@@ -253,12 +261,16 @@ export function selectProvider(
   }
   weights = normalizeScoringWeights(weights);
 
-  // Filter out excluded providers
+  // Apply the operator's provider pool first. Preserve the historical fail-open
+  // only for a stale/empty configured pool; health and capability gates below
+  // never fail open.
   const excluded: string[] = [];
-  const pool = candidates.filter((c) => {
-    // Pool filter
-    if (config.candidatePool.length > 0 && !config.candidatePool.includes(c.provider)) return false;
-
+  const configuredPool = candidates.filter(
+    (candidate) =>
+      config.candidatePool.length === 0 || config.candidatePool.includes(candidate.provider)
+  );
+  const candidatePool = configuredPool.length > 0 ? configuredPool : candidates;
+  const pool = candidatePool.filter((c) => {
     // Self-healing exclusion
     const evaluation = healer.evaluate(c.provider, 0.5, c.circuitBreakerState);
     if (evaluation.excluded) {
@@ -269,13 +281,18 @@ export function selectProvider(
   });
 
   if (pool.length === 0) {
-    // Fallback: allow all candidates regardless of exclusions
-    pool.push(...candidates);
-    excluded.length = 0;
+    throw new NoEligibleCandidateError("Every candidate is excluded by current health state");
   }
 
-  // Score all providers (using classified intent if available)
-  const scored = scorePool(pool, effectiveTaskType, weights, getTaskFitness);
+  // Eligibility → capability → cost → latency → reliability. The weighted
+  // factors remain available for diagnostics and equal-cost tie breaking.
+  const scored = rankCheapestCapable(
+    pool,
+    { ...requirements, taskType: effectiveTaskType },
+    weights,
+    getTaskFitness
+  );
+  if (scored.length === 0) throw new NoEligibleCandidateError();
 
   // Apply self-healing re-evaluation with actual scores
   const finalCandidates = scored.filter((s) => {
@@ -287,7 +304,10 @@ export function selectProvider(
     return true;
   });
 
-  const candidates_ = finalCandidates.length > 0 ? finalCandidates : scored;
+  if (finalCandidates.length === 0) {
+    throw new NoEligibleCandidateError("Every capable candidate is excluded by self-healing");
+  }
+  const candidates_ = finalCandidates;
 
   // Incident mode check
   const incidentMode = healer.isInIncidentMode();
@@ -295,14 +315,30 @@ export function selectProvider(
 
   // Selection: exploration vs exploitation
   let selected: ScoredProvider;
-  const isExploration = Math.random() < effectiveExplorationRate && candidates_.length > 1;
+  const costByIdentity = new Map<string, number>();
+  for (const candidate of pool) {
+    costByIdentity.set(
+      `${candidate.provider}\0${candidate.model}\0${candidate.connectionId ?? ""}`,
+      candidate.costPer1MTokens
+    );
+  }
+  const costOf = (candidate: ScoredProvider): number =>
+    costByIdentity.get(
+      `${candidate.provider}\0${candidate.model}\0${candidate.connectionId ?? ""}`
+    ) ?? Number.POSITIVE_INFINITY;
+  const cheapestCost = costOf(candidates_[0]);
+  const costEpsilon = Math.max(1e-9, Math.abs(cheapestCost) * 0.001);
+  const cheapestBand = candidates_.filter(
+    (candidate) => Math.abs(costOf(candidate) - cheapestCost) <= costEpsilon
+  );
+  const isExploration = Math.random() < effectiveExplorationRate && cheapestBand.length > 1;
 
   if (isExploration) {
-    const idx = Math.floor(Math.random() * candidates_.length);
-    selected = candidates_[idx];
+    const idx = Math.floor(Math.random() * cheapestBand.length);
+    selected = cheapestBand[idx];
   } else {
     const rotator = getRotator(config.name);
-    selected = rotator.pick(candidates_);
+    selected = rotator.pick(cheapestBand);
   }
 
   // Budget cap enforcement

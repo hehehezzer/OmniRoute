@@ -116,7 +116,7 @@ describe("Tiered Rotation in selectProvider", () => {
     const config = makeConfig("smart");
     const seen = new Set<string>();
     for (let i = 0; i < 50; i++) {
-      const result = selectProvider(config, pool, "coding");
+      const result = selectProvider(config, pool, "default");
       seen.add(`${result.provider}/${result.model}`);
     }
     expect(seen.size).toBeGreaterThanOrEqual(2);
@@ -137,7 +137,7 @@ describe("Tiered Rotation in selectProvider", () => {
     const config = makeConfig("cheap");
     const counts: Record<string, number> = {};
     for (let i = 0; i < 200; i++) {
-      const result = selectProvider(config, pool, "coding");
+      const result = selectProvider(config, pool, "default");
       counts[result.provider] = (counts[result.provider] ?? 0) + 1;
     }
     expect(counts["cheap-provider"]).toBeGreaterThan(0);
@@ -147,7 +147,7 @@ describe("Tiered Rotation in selectProvider", () => {
     const only = makeCandidate({ provider: "only", model: "only-model" });
     const config = makeConfig("smart");
     for (let i = 0; i < 10; i++) {
-      const result = selectProvider(config, [only], "coding");
+      const result = selectProvider(config, [only], "default");
       expect(result.provider).toBe("only");
       expect(result.model).toBe("only-model");
     }
@@ -189,7 +189,7 @@ describe("Per-Connection Rotation", () => {
 
       const seenConnections = new Set<string>();
       for (let i = 0; i < 200; i++) {
-        const result = selectProvider(config, cerebrasCandidates, "coding");
+        const result = selectProvider(config, cerebrasCandidates, "default");
         if (result.connectionId) seenConnections.add(result.connectionId);
       }
       expect(seenConnections.size).toBeGreaterThanOrEqual(10);
@@ -209,20 +209,20 @@ describe("Per-Connection Rotation", () => {
     const fastConfig = makeConfig("fast-B");
 
     for (let i = 0; i < 5; i++) {
-      selectProvider(smartConfig, candidates, "coding");
+      selectProvider(smartConfig, candidates, "default");
     }
     const smartResults: string[] = [];
     for (let i = 0; i < 5; i++) {
-      const r = selectProvider(smartConfig, candidates, "coding");
+      const r = selectProvider(smartConfig, candidates, "default");
       if (r.connectionId) smartResults.push(r.connectionId);
     }
 
     for (let i = 0; i < 5; i++) {
-      selectProvider(fastConfig, candidates, "coding");
+      selectProvider(fastConfig, candidates, "default");
     }
     const fastResults: string[] = [];
     for (let i = 0; i < 5; i++) {
-      const r = selectProvider(fastConfig, candidates, "coding");
+      const r = selectProvider(fastConfig, candidates, "default");
       if (r.connectionId) fastResults.push(r.connectionId);
     }
 
@@ -239,7 +239,7 @@ describe("Per-Connection Rotation", () => {
     const config = makeConfig("smart");
     const visited = new Set<string>();
     for (let i = 0; i < 20; i++) {
-      const result = selectProvider(config, candidates, "coding");
+      const result = selectProvider(config, candidates, "default");
       if (result.connectionId) visited.add(result.connectionId);
     }
     expect(visited.size).toBeGreaterThan(1);

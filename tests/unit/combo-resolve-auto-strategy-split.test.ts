@@ -14,8 +14,8 @@ after(() => {
 // branch of handleComboChat was extracted verbatim into resolveAutoStrategyOrder,
 // with `buildAutoCandidates` injected (it lives in combo.ts, so a direct import
 // would cycle). These tests pin the DI contract and the two control-flow exits
-// that the host now forwards: an early 429 Response, and the default-ordering
-// pass-through. The routable-selection path is covered end-to-end by the 60
+// that the host now forwards: an early 429 quota response and an explicit 503
+// when no healthy/capable candidate exists. The routable-selection path is covered end-to-end by the 60
 // consumer tests (router-strategies / auto-combo-engine / combo-strategy-fallbacks).
 
 const noopLog = {
@@ -55,15 +55,12 @@ test("exports resolveAutoStrategyOrder", () => {
   assert.equal(typeof resolveAutoStrategyOrder, "function");
 });
 
-test("no candidates -> keeps default ordering, no explicit router", async () => {
+test("no candidates -> fails closed instead of resurrecting default targets", async () => {
   const build = (async () => []) as never;
   const result = await resolveAutoStrategyOrder(baseDeps(build));
-  assert.ok(!("earlyResponse" in result));
-  if ("orderedTargets" in result) {
-    assert.equal(result.autoUsedExplicitRouter, false);
-    // default ordering preserved (both original targets survive)
-    assert.equal(result.orderedTargets.length, 2);
-    assert.equal(result.orderedTargets[0].provider, "openai");
+  assert.ok("earlyResponse" in result);
+  if ("earlyResponse" in result) {
+    assert.equal(result.earlyResponse.status, 503);
   }
 });
 
@@ -84,6 +81,33 @@ test("all candidates quota-cutoff-blocked -> early 429 Response", async () => {
   if ("earlyResponse" in result) {
     assert.ok(result.earlyResponse instanceof Response);
     assert.equal(result.earlyResponse.status, 429);
+  }
+});
+
+test("all candidates unavailable -> early 503 without fallback resurrection", async () => {
+  const build = (async () => [
+    {
+      kind: "model",
+      stepId: "s1",
+      executionKey: "openai>gpt-4o",
+      modelStr: "gpt-4o",
+      provider: "openai",
+      model: "gpt-4o",
+      quotaRemaining: 100,
+      quotaTotal: 100,
+      circuitBreakerState: "CLOSED",
+      costPer1MTokens: 1,
+      p95LatencyMs: 100,
+      latencyStdDev: 10,
+      errorRate: 0,
+      statusPenalty: true,
+      statusPenaltyReason: "rate_limited",
+    },
+  ]) as never;
+  const result = await resolveAutoStrategyOrder(baseDeps(build));
+  assert.ok("earlyResponse" in result);
+  if ("earlyResponse" in result) {
+    assert.equal(result.earlyResponse.status, 503);
   }
 });
 
