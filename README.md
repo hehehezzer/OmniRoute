@@ -1,3 +1,39 @@
+# OmniRoute — Quattro-Compatible Fork
+
+This repository is a maintained fork of
+[OmniRoute](https://github.com/diegosouzapw/OmniRoute) by Diego Souza and contributors.
+It adds capability-aware routing, candidate observability, practical context filtering,
+bounded fallback, and an optional external routing preference contract used by
+Quattro, while preserving upstream
+compatibility where practical.
+
+- **Upstream:** <https://github.com/diegosouzapw/OmniRoute>
+- **This fork:** <https://github.com/hehehezzer/OmniRoute>
+- **License:** the upstream MIT license is preserved unchanged in [LICENSE](LICENSE).
+- **Compatibility:** ordinary OmniRoute requests require no fork-specific fields. Enhanced
+  routing metadata is additive and optional.
+
+## Fork-specific routing interfaces
+
+| Interface                                     | Purpose                                                                                   |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `GET /api/v1/capabilities`                    | Negotiate support for enhanced routing features.                                          |
+| `GET /api/v1/routing/candidates?channel=auto` | Read a versioned, sanitized candidate snapshot without account or credential identifiers. |
+| Optional `routing` request object             | Supply bounded hard requirements and ordered candidate preferences.                       |
+
+Runtime health, quota, rate limits, cooldown, fallback, and final dispatch remain authoritative
+inside OmniRoute. Quattro supplies preferences and interprets model quality; benchmark logic and
+private orchestration state do not live in this provider runtime.
+
+See [installing this fork](docs/fork/install.md), [Quattro integration](docs/integrations/quattro.md),
+[fork maintenance and upstream sync](docs/fork/maintenance.md), and the
+[first fork release notes](docs/releases/v3.8.51-quattro.1.md).
+
+---
+
+The remainder of this README is retained from upstream OmniRoute so standard installation,
+provider, API, and operations documentation stays available and attributable.
+
 <div align="center">
 
 <img src="./docs/screenshots/MainOmniRoute.png" alt="OmniRoute Dashboard" width="820"/>

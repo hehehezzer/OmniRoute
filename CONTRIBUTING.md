@@ -1,5 +1,12 @@
 # Contributing to OmniRoute
 
+> **Fork note:** changes intended for this repository should clone
+> `https://github.com/hehehezzer/OmniRoute.git` and target the fork's current release-preparation
+> branch. Generic fixes should remain separable so they can be proposed to
+> [upstream OmniRoute](https://github.com/diegosouzapw/OmniRoute) later. Do not rewrite upstream
+> history or mix Quattro integration policy with unrelated provider-runtime changes. See
+> [docs/fork/maintenance.md](docs/fork/maintenance.md).
+
 Thank you for your interest in contributing! This guide covers everything you need to get started.
 
 For the official per-change workflow, start with the
@@ -26,7 +33,7 @@ coverage, and reconciliation steps.
 ### Clone & Install
 
 ```bash
-git clone https://github.com/diegosouzapw/OmniRoute.git
+git clone https://github.com/hehehezzer/OmniRoute.git
 cd OmniRoute
 npm install
 ```

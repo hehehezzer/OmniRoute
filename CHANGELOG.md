@@ -4,6 +4,13 @@
 
 ### ✨ New Features
 
+- **feat(api):** add versioned capability negotiation and a read-only candidate snapshot that
+  omits connection identifiers, credentials, provider error bodies, and private configuration.
+- **feat(router):** accept an optional schema-versioned routing envelope with bounded required
+  capabilities, minimum practical context, ordered preferred candidates, and policy identifiers.
+  Preferences are revalidated against capability, health, quota, cooldown, rate-limit, and
+  context gates at dispatch time.
+
 - **feat(router):** capability-aware auto routing classifies repository, infrastructure,
   security, research, coding, document-generation, and conversation requests before
   selection. Repository execution now requires a verified filesystem, shell, Git,
