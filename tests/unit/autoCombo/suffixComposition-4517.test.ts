@@ -50,7 +50,7 @@ describe("suffixComposition :free tier (#4517)", () => {
     // Regression: opencode was noAuth and free, but the
     // pre-fix `freeProviders` list omitted it, so the filter rejected
     // its candidates even though it IS free upstream.
-    const filter = buildAutoCandidateFilter("coding", "free");
+    const filter = buildAutoCandidateFilter("chat", "free");
     assert.notEqual(filter, null);
 
     assert.equal(filter!({ provider: "opencode", model: "big-pickle" }), true);
@@ -60,7 +60,7 @@ describe("suffixComposition :free tier (#4517)", () => {
 
   it("buildAutoCandidateFilter keeps legacy free providers", () => {
     // Don't break the existing list — kiro, qoder, groq, etc. must still pass.
-    const filter = buildAutoCandidateFilter("coding", "free");
+    const filter = buildAutoCandidateFilter("chat", "free");
     assert.equal(filter!({ provider: "kiro", model: "claude-sonnet-4-5" }), true);
     assert.equal(filter!({ provider: "groq", model: "llama-3.3-70b" }), true);
     assert.equal(filter!({ provider: "qoder", model: "qwen3-coder-plus" }), true);
@@ -70,24 +70,24 @@ describe("suffixComposition :free tier (#4517)", () => {
     // The bug: opencode-go/glm-5.1 was being picked because the filter
     // fell back to the full pool when no free candidate was found.
     // After the fix, glm-5.1 must be rejected by the :free filter.
-    const filter = buildAutoCandidateFilter("coding", "free");
+    const filter = buildAutoCandidateFilter("chat", "free");
     assert.equal(filter!({ provider: "opencode-go", model: "glm-5.1" }), false);
     assert.equal(filter!({ provider: "openai", model: "gpt-4o" }), false);
     assert.equal(filter!({ provider: "anthropic", model: "claude-sonnet-4-6" }), false);
     assert.equal(filter!({ provider: "deepseek", model: "deepseek-chat" }), false);
   });
 
-  it("buildAutoCandidateFilter returns null for category-only (no tier)", () => {
-    // "coding" with no tier must NOT filter by tier — pass-through.
-    const filter = buildAutoCandidateFilter("coding", undefined);
+  it("buildAutoCandidateFilter returns null for chat-only (no tier)", () => {
+    // Chat has no capability constraint and no tier filter — pass-through.
+    const filter = buildAutoCandidateFilter("chat", undefined);
     assert.equal(filter, null);
   });
 
   it("buildAutoCandidateFilter keeps free candidates alongside capability checks", () => {
     // The category and tier checks are AND-combined. For "coding:free" the
-    // category check is a pass-through (no vision/reasoning filter), so
+    // chat's category check is a pass-through, so
     // any free model should be kept.
-    const filter = buildAutoCandidateFilter("coding", "free");
+    const filter = buildAutoCandidateFilter("chat", "free");
     assert.equal(filter!({ provider: "opencode", model: "minimax-m3-free" }), true);
     // The "reasoning" category also pairs with ":free" and keeps free models.
     const reasoningFilter = buildAutoCandidateFilter("reasoning", "free");

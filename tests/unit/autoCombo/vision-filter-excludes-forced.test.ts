@@ -32,8 +32,8 @@ describe("buildAutoCandidateFilter — vision category", () => {
     expect(filter?.({ provider: "acme", model: "acme-text" })).toBe(false);
   });
 
-  it("non-vision categories are unaffected", () => {
-    const filter = buildAutoCandidateFilter("coding");
+  it("chat remains unconstrained", () => {
+    const filter = buildAutoCandidateFilter("chat");
     expect(filter).toBeNull();
   });
 });

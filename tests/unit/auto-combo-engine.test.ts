@@ -69,8 +69,8 @@ test("selectProvider does not let a legacy model label override current coding c
     },
   ]);
 
-  assert.equal(result.provider, "openai");
-  assert.equal(result.model, "gpt-4o-mini");
+  assert.equal(result.provider, "codex");
+  assert.equal(result.model, "gpt-5.1-codex");
   assert.equal(result.isExploration, false);
 });
 
