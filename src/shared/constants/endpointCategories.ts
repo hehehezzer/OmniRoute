@@ -70,7 +70,7 @@ export const ENDPOINT_CATEGORIES: readonly EndpointCategory[] = [
     id: "models",
     label: "Models",
     description: "List available models (read-only)",
-    prefixes: ["/v1/models"],
+    prefixes: ["/v1/models", "/v1/capabilities", "/v1/routing/candidates"],
   },
   {
     id: "moderations",
