@@ -1023,6 +1023,10 @@ async function handleComboChatInner({
   );
   let comboCooldownAttempt = 0;
   let comboCooldownBudgetLeftMs = resilienceSettings.comboCooldownWait.budgetMs;
+  // Every set attempt owns one safety timer. Keep only timer handles here so
+  // every terminal path (success, failure, timeout, or client cancellation)
+  // can release them from the outer request finally block.
+  const activeLoopSafetyTimers = new Set<ReturnType<typeof setTimeout>>();
 
   // Global combo timeout: when set (>0), limits total wall-clock time the combo
   // spends iterating through targets. After each target completes, if elapsed time
@@ -1087,18 +1091,8 @@ async function handleComboChatInner({
       const transientRateLimitedProviders = new Set<string>();
       if (setTry > 0) {
         log.info("COMBO", `All targets failed — retrying set (${setTry}/${maxSetRetries})`);
-        await new Promise((resolve) => {
-          const timer = setTimeout(resolve, setRetryDelayMs);
-          signal?.addEventListener(
-            "abort",
-            () => {
-              clearTimeout(timer);
-              resolve(undefined);
-            },
-            { once: true }
-          );
-        });
-        if (signal?.aborted) {
+        const completed = await waitForCooldownAwareRetry(setRetryDelayMs, signal);
+        if (!completed) {
           log.info("COMBO", "Client disconnected during set retry delay — aborting");
           return errorResponse(499, "Client disconnected");
         }
@@ -1150,6 +1144,7 @@ async function handleComboChatInner({
       let loopSafetyTimer: ReturnType<typeof setTimeout> | null = null;
       const loopSafetyPromise = new Promise<Response>((resolve) => {
         loopSafetyTimer = setTimeout(() => {
+          if (loopSafetyTimer) activeLoopSafetyTimers.delete(loopSafetyTimer);
           loopSafetyFired = true;
           log.warn(
             "COMBO",
@@ -1164,6 +1159,7 @@ async function handleComboChatInner({
             )
           );
         }, loopSafetyMs);
+        activeLoopSafetyTimers.add(loopSafetyTimer);
         loopSafetyTimer.unref?.();
       });
       const runningTasks = new Set<Promise<void>>();
@@ -1506,18 +1502,8 @@ async function handleComboChatInner({
               "COMBO",
               `Retrying ${modelStr} in ${retryDelayMs}ms (attempt ${retry + 1}/${maxRetries + 1})`
             );
-            await new Promise((resolve) => {
-              const timer = setTimeout(resolve, retryDelayMs);
-              signal?.addEventListener(
-                "abort",
-                () => {
-                  clearTimeout(timer);
-                  resolve(undefined);
-                },
-                { once: true }
-              );
-            });
-            if (signal?.aborted) {
+            const completed = await waitForCooldownAwareRetry(retryDelayMs, signal);
+            if (!completed) {
               log.info("COMBO", `Client disconnected during retry delay — aborting`);
               return { ok: false, response: errorResponse(499, "Client disconnected") };
             }
@@ -2473,18 +2459,8 @@ async function handleComboChatInner({
               : 0;
           if ([502, 503, 504].includes(result.status) && fallbackWaitMs > 0) {
             log.debug?.("COMBO", `Waiting ${fallbackWaitMs}ms before fallback to next model`);
-            await new Promise((resolve) => {
-              const timer = setTimeout(resolve, fallbackWaitMs);
-              signal?.addEventListener(
-                "abort",
-                () => {
-                  clearTimeout(timer);
-                  resolve(undefined);
-                },
-                { once: true }
-              );
-            });
-            if (signal?.aborted) {
+            const completed = await waitForCooldownAwareRetry(fallbackWaitMs, signal);
+            if (!completed) {
               log.info("COMBO", `Client disconnected during fallback wait — aborting`);
               return { ok: false, response: errorResponse(499, "Client disconnected") };
             }
@@ -2611,6 +2587,7 @@ async function handleComboChatInner({
         // not leave a 10-minute timer alive per request.
         if (loopSafetyTimer) {
           clearTimeout(loopSafetyTimer);
+          activeLoopSafetyTimers.delete(loopSafetyTimer);
           loopSafetyTimer = null;
         }
         return await globalPromise;
@@ -2849,6 +2826,8 @@ async function handleComboChatInner({
   try {
     return await dispatchWithCooldownRetry();
   } finally {
+    for (const timer of activeLoopSafetyTimers) clearTimeout(timer);
+    activeLoopSafetyTimers.clear();
     quotaShareConcurrencyRelease?.();
     // #11371: release the in-flight slot quota-share ordering reserved for its
     // winner — the counter must not leak monotonically upward across requests.

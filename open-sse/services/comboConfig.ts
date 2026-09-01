@@ -8,6 +8,7 @@
 import { MAX_TIMER_TIMEOUT_MS } from "../../src/shared/utils/runtimeTimeouts.ts";
 import type { ComboCooldownWaitSettings } from "../../src/lib/resilience/settings.ts";
 import type { ResponseValidationConfig } from "./combo/responseValidation.ts";
+import { MAX_GLOBAL_ATTEMPTS } from "./combo/comboPredicates.ts";
 
 /**
  * Maximum number of concurrent pre-screen checks (provider profile + availability)
@@ -118,7 +119,7 @@ const DEFAULT_COMBO_CONFIG = {
   // MAX_GLOBAL_ATTEMPTS with no override — operators could neither fail fast on
   // a dead pool nor raise it for large combos. Clamped by clampGlobalAttempts to
   // [1, MAX_GLOBAL_ATTEMPTS_HARD_CAP] at every read site.
-  maxGlobalAttempts: 30,
+  maxGlobalAttempts: MAX_GLOBAL_ATTEMPTS,
   nestedComboMode: "flatten",
   trackMetrics: true,
   reasoningTokenBufferEnabled: true,
@@ -177,7 +178,7 @@ const DEFAULT_COMBO_CONFIG = {
   // elapsed time exceeds comboTimeoutMs, remaining targets are skipped and a 504 with
   // aggregated error diagnostics is returned. Backward-compatible: 0 preserves the
   // legacy unlimited-iteration behavior.
-  comboTimeoutMs: 0,
+  comboTimeoutMs: 3 * 60 * 1000,
   shadowRouting: {
     enabled: false,
     targets: [],

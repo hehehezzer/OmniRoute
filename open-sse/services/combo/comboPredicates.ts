@@ -22,7 +22,7 @@ export const TRANSIENT_FOR_SEMAPHORE = [429, 502, 503, 504];
 // left comboTimeoutMs at 0 ("unlimited"). Without this, a hung upstream (per-model
 // timeout disabled) would freeze the request forever with no response. 10 minutes
 // is a generous bound for legitimate long-running fallback cascades.
-export const COMBO_LOOP_SAFETY_TIMEOUT_MS = 10 * 60 * 1000;
+export const COMBO_LOOP_SAFETY_TIMEOUT_MS = 3 * 60 * 1000;
 // G1: after the safety timer fires, wait this long for in-flight targets to land
 // their per-model errors into comboErrors (so the 504 carries the same "tried:"
 // summary as the regular timeout path) before returning the safety response.
@@ -95,7 +95,7 @@ export const MAX_COMBO_DEPTH = 3;
 // nested-combo expansion is a real DoS/perf risk.
 export const MAX_COMBO_DEPTH_HARD_CAP = 10;
 export const MAX_FALLBACK_WAIT_MS = 5000;
-export const MAX_GLOBAL_ATTEMPTS = 30;
+export const MAX_GLOBAL_ATTEMPTS = 12;
 // Absolute safety ceiling for the operator-configured shared attempt budget
 // (#11134). config.maxGlobalAttempts can raise the default (30) or lower it,
 // but never above this cap — an unbounded attempt budget is the same runaway

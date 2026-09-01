@@ -145,3 +145,38 @@ test("signal abort during fallback wait interrupts immediately", async () => {
   assert.ok(elapsed < 2000, `Expected fast abort, but took ${elapsed}ms`);
   assert.equal(result.status, 499, "should return 499 after abort during wait");
 });
+
+test("terminal combo failure clears its long-lived safety timer", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const liveSafetyTimers = new Set<ReturnType<typeof setTimeout>>();
+  globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+    const timer = originalSetTimeout(handler, timeout, ...args);
+    if ((timeout ?? 0) >= 180_000) liveSafetyTimers.add(timer);
+    return timer;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout>) => {
+    liveSafetyTimers.delete(timer);
+    return originalClearTimeout(timer);
+  }) as typeof clearTimeout;
+
+  try {
+    const combo = {
+      ...makeCombo("priority", ["a/model-1"]),
+      config: { maxRetries: 0, maxSetRetries: 0 },
+    };
+    const result = await handleComboChat({
+      body: { model: "test", messages: [{ role: "user", content: "hi" }] },
+      combo,
+      handleSingleModel: async () => new Response("Bad Gateway", { status: 502 }),
+      log,
+      settings: {},
+      allCombos: [],
+    });
+    assert.equal(result.status, 502);
+    assert.equal(liveSafetyTimers.size, 0, "request terminal paths must release safety timers");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
