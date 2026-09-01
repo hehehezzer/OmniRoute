@@ -8,6 +8,7 @@ import { invalidateDbCache } from "./readCache";
 
 export type NumericModelCapabilityOverrideKey =
   | "max_input_tokens"
+  | "practical_input_tokens"
   | "max_output_tokens"
   | "max_token";
 export type ModelCapabilityOverrideKey = NumericModelCapabilityOverrideKey | "reasoning_efforts";
@@ -38,7 +39,12 @@ interface OverrideRow {
 }
 
 function isNumericKey(value: unknown): value is NumericModelCapabilityOverrideKey {
-  return value === "max_input_tokens" || value === "max_output_tokens" || value === "max_token";
+  return (
+    value === "max_input_tokens" ||
+    value === "practical_input_tokens" ||
+    value === "max_output_tokens" ||
+    value === "max_token"
+  );
 }
 
 function isSupportedKey(value: unknown): value is ModelCapabilityOverrideKey {

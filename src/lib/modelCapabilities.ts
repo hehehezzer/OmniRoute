@@ -586,13 +586,22 @@ function resolveVisionCapability(
  */
 function getCapabilityOverride(
   resolved: { provider: string | null; model: string | null; rawModel: string | null },
-  key: "max_input_tokens" | "max_output_tokens"
+  key: "max_input_tokens" | "practical_input_tokens" | "max_output_tokens"
 ): number | null {
   const canonical = getModelCapabilityOverride(resolved.provider, resolved.model, key);
   if (canonical !== null) return canonical;
   return resolved.rawModel && resolved.rawModel !== resolved.model
     ? getModelCapabilityOverride(resolved.provider, resolved.rawModel, key)
     : null;
+}
+
+/**
+ * Resolve an operator-configured practical input ceiling. Unlike the hard
+ * context fields this is an OmniRoute operating policy, not a provider
+ * guarantee. Unknown/unset stays null and therefore never excludes a target.
+ */
+export function getPracticalModelInputLimit(input: CapabilityInput): number | null {
+  return getCapabilityOverride(resolveCapabilityInput(input), "practical_input_tokens");
 }
 
 function getContextOverride(

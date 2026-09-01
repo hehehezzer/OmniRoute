@@ -19,6 +19,7 @@ import { getProviderPrefixIndex, type ProviderPrefixEntry } from "@/lib/provider
 const overrideKeySchema = z.enum([
   "context_length",
   "max_input_tokens",
+  "practical_input_tokens",
   "max_output_tokens",
   "reasoning_efforts",
 ]);
@@ -103,7 +104,12 @@ const reasoningEffortsValueSchema = z.string().transform((value, context) => {
 const upsertOverrideSchema = z.discriminatedUnion("key", [
   z.object({
     target: z.string().min(3),
-    key: z.enum(["context_length", "max_input_tokens", "max_output_tokens"]),
+    key: z.enum([
+      "context_length",
+      "max_input_tokens",
+      "practical_input_tokens",
+      "max_output_tokens",
+    ]),
     value: z.coerce.number().int().positive(),
   }),
   z.object({

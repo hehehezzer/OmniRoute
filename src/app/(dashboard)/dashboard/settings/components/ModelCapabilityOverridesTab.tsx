@@ -10,7 +10,11 @@ import {
 } from "@/lib/modelCapabilityOverrideTargets";
 
 type ModelOverrideKey =
-  "context_length" | "max_input_tokens" | "max_output_tokens" | "reasoning_efforts";
+  | "context_length"
+  | "max_input_tokens"
+  | "practical_input_tokens"
+  | "max_output_tokens"
+  | "reasoning_efforts";
 type ModelOverrideValue = number | string[];
 type StatusTone = "success" | "error" | "info";
 
@@ -340,6 +344,7 @@ function ModelOverrideForm({
       >
         <option value="context_length">context_length</option>
         <option value="max_input_tokens">max_input_tokens</option>
+        <option value="practical_input_tokens">practical_input_tokens</option>
         <option value="max_output_tokens">max_output_tokens</option>
         <option value="reasoning_efforts">reasoning_efforts</option>
       </select>

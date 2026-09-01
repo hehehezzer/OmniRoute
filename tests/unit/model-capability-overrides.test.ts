@@ -110,7 +110,7 @@ describe("model capability overrides", () => {
     );
   });
 
-  it("accepts exactly the three public token-limit keys through the API", async () => {
+  it("accepts hard and practical token-limit keys through the API", async () => {
     assert.equal(
       contextOverrides.setModelContextOverride("codex", "gpt-5.6", 272000, "auto:discovery"),
       true
@@ -133,6 +133,7 @@ describe("model capability overrides", () => {
 
     assert.equal((await patchOverride("context_length", 372000)).status, 200);
     assert.equal((await patchOverride("max_input_tokens", 353400)).status, 200);
+    assert.equal((await patchOverride("practical_input_tokens", 90000)).status, 200);
     assert.equal((await patchOverride("max_output_tokens", 128000)).status, 200);
     assert.equal((await patchOverride("max_token", 77777)).status, 400, "legacy key");
     assert.equal((await patchOverride("unknown", 1)).status, 400, "unsupported key");
@@ -157,6 +158,7 @@ describe("model capability overrides", () => {
         { target: "codex/gpt-5.6", key: "context_length", value: 372000 },
         { target: "codex/gpt-5.6", key: "max_input_tokens", value: 353400 },
         { target: "codex/gpt-5.6", key: "max_output_tokens", value: 128000 },
+        { target: "codex/gpt-5.6", key: "practical_input_tokens", value: 90000 },
       ]
     );
 

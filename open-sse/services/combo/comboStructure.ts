@@ -13,7 +13,10 @@
  * No barrel import — depends only on sibling leaves.
  */
 
-import { getModelContextLimit } from "../../../src/lib/modelCapabilities";
+import {
+  getModelContextLimit,
+  getPracticalModelInputLimit,
+} from "../../../src/lib/modelCapabilities";
 import { getHiddenModelsByProvider } from "../../../src/lib/db/models";
 import { getComboModelString, normalizeComboStep } from "../../../src/lib/combos/steps.ts";
 import { getProviderByAlias, getProviderById } from "../../../src/shared/constants/providers.ts";
@@ -533,7 +536,14 @@ function hasKnownCompatibleContextLimit(
   return evaluateContextLimit(capabilities, requirements, target.modelStr) === true;
 }
 
-const HARD_COMPAT_REASONS = new Set(["tools", "vision", "structured_output", "output_tokens"]);
+const HARD_COMPAT_REASONS = new Set([
+  "tools",
+  "vision",
+  "structured_output",
+  "output_tokens",
+  "context_window",
+  "practical_input_limit",
+]);
 
 /**
  * #8332: vision is a hard requirement, not a soft preference — a target whose vision
@@ -604,6 +614,14 @@ function getTargetCompatibilityFailures(
   const contextVerdict = evaluateContextLimit(capabilities, requirements, target.modelStr);
   if (requirements.requiredContextTokens > 0 && contextVerdict === false) {
     failures.push("context_window");
+  }
+
+  const practicalInputLimit = getPracticalModelInputLimit(target.modelStr);
+  if (
+    practicalInputLimit !== null &&
+    requirements.estimatedInputTokens > practicalInputLimit
+  ) {
+    failures.push("practical_input_limit");
   }
 
   return failures;
@@ -698,10 +716,15 @@ export function filterTargetsByRequestCompatibility(
     targetReasons.set(target, reasons);
     if (reasons.length > 0) rejected.push({ target, reasons });
   }
+  log.debug?.(
+    "COMBO",
+    `${label}: candidates=${targets.length} estimatedInputTokens=${requirements.estimatedInputTokens} ` +
+      `requiredContextTokens=${requirements.requiredContextTokens}`
+  );
 
-  // Context metadata is advisory. Keep every target that has no hard capability
-  // mismatch, but prefer targets whose known limit fits. A stale catalog entry must
-  // never remove the only target that could accept the request at runtime.
+  // Verified hard context limits and operator-configured practical limits are
+  // dispatch barriers. Unknown limits remain eligible; operators can override a
+  // stale hard catalog value through the existing exact model context override.
   const compatible = targets.filter((target) => {
     const reasons = targetReasons.get(target) || [];
     return !reasons.some((reason) => HARD_COMPAT_REASONS.has(reason));
@@ -726,6 +749,11 @@ export function filterTargetsByRequestCompatibility(
   if (compatible.length === targets.length) return targets;
   if (compatible.length === 0) {
     const hardRejected = rejected.some((entry) => hasHardCapabilityFailure(entry.reasons));
+    const knownLimitRejected = rejected.some((entry) =>
+      entry.reasons.some((reason) =>
+        reason === "context_window" || reason === "practical_input_limit"
+      )
+    );
     const failOpen = options?.failOpen === true;
 
     log.debug?.(
@@ -757,9 +785,9 @@ export function filterTargetsByRequestCompatibility(
       return visionSafe;
     }
 
-    // Context/output-only exhaustion keeps the legacy fail-open path — the honest
-    // answer is the existing context_length_exceeded gate, not a capability error.
-    if (!hardRejected || failOpen) {
+    // Unknown limits fail open, but a known hard/practical incompatibility must
+    // never be resurrected just because it would otherwise empty the pool.
+    if (!hardRejected || (failOpen && !knownLimitRejected)) {
       log.warn(
         "COMBO",
         `${label}: all ${targets.length} targets were filtered by request requirements; preserving strategy order`
