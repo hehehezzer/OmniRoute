@@ -40,6 +40,7 @@ test("#7819: GET /candidates for the base 'auto' channel returns 200 with a cand
   const body = await res.json();
   assert.equal(body.channel, "auto");
   assert.ok(Array.isArray(body.candidates));
+  assert.equal(JSON.stringify(body).includes("connectionId"), false);
 });
 
 test("#7819: GET /candidates rejects an invalid channel path segment (400, sanitized body)", async () => {

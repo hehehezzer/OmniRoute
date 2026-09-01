@@ -26,10 +26,7 @@ export async function OPTIONS() {
   return handleCorsOptions();
 }
 
-export async function GET(
-  request: Request,
-  { params }: { params: Promise<{ channel: string }> }
-) {
+export async function GET(request: Request, { params }: { params: Promise<{ channel: string }> }) {
   const scope = await getApiKeyRequestScope(request);
   if (scope.rejection) return scope.rejection;
 
@@ -44,7 +41,15 @@ export async function GET(
 
   try {
     const result = await getAutoComboCandidates(parsedChannel.data, scope.apiKeyId);
-    return NextResponse.json(result, { headers: CORS_HEADERS });
+    return NextResponse.json(
+      {
+        ...result,
+        candidates: result.candidates.map(
+          ({ connectionId: _connectionId, ...candidate }) => candidate
+        ),
+      },
+      { headers: CORS_HEADERS }
+    );
   } catch (err) {
     if (isUnknownAutoChannelError(err)) {
       return NextResponse.json(buildErrorBody(404, "Unknown auto channel"), {
@@ -52,9 +57,9 @@ export async function GET(
         headers: CORS_HEADERS,
       });
     }
-    return NextResponse.json(
-      buildErrorBody(500, err instanceof Error ? err.message : "Failed to list candidates"),
-      { status: 500, headers: CORS_HEADERS }
-    );
+    return NextResponse.json(buildErrorBody(500, "Failed to list candidates"), {
+      status: 500,
+      headers: CORS_HEADERS,
+    });
   }
 }
