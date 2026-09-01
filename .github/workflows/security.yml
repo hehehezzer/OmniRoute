@@ -1,0 +1,32 @@
+name: Security checks
+
+on:
+  pull_request:
+    branches: [main, "release/**"]
+  push:
+    branches: [main, "release/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-and-secret-checks:
+    name: Dependency and secret checks
+    runs-on: ubuntu-latest
+    env:
+      DISABLE_SQLITE_AUTO_BACKUP: "true"
+      JWT_SECRET: ci-security-secret-with-sufficient-length-for-validation
+      API_KEY_SECRET: ci-security-api-key-secret-long
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=critical
+      - run: npm run check:secrets
+      - run: npm run check:public-creds

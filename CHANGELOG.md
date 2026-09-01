@@ -4,6 +4,39 @@
 
 ### ✨ New Features
 
+- **feat(router):** capability-aware auto routing classifies repository, infrastructure,
+  security, research, coding, document-generation, and conversation requests before
+  selection. Repository execution now requires a verified filesystem, shell, Git,
+  code-editing/execution, repository-access, and workspace-write capability; web-only
+  routes fail closed with bounded diagnostics instead of silently winning on cost.
+- **feat(models):** add an operator-configurable `practical_input_tokens` limit for
+  conservative per-model routing policy without changing authoritative provider limits.
+
+### 🔄 Changed
+
+- Auto-combo ranking now removes unavailable, quota-exhausted, context-incompatible,
+  and capability-incompatible candidates before health/cost selection and fallback ordering.
+- The legacy `requestQueue.maxWaitMs` setting now bounds queue residence only; provider,
+  target, and combo policies own post-dispatch execution deadlines.
+
+### 🐛 Bug Fixes
+
+- Stabilize Gemini tool aliases when a Responses client replays conversation history.
+- Clear combo safety timers on every terminal path and bound the default fallback lifecycle.
+
+### 🔐 Security
+
+- Add a dedicated GitHub security workflow for critical dependency, secret, and public
+  credential checks on main and release branches.
+
+### ⚠️ Breaking Changes
+
+- Known hard context or operator practical-input limits are dispatch barriers; targets that
+  exceed them no longer remain as fallback candidates. Unknown limits remain eligible.
+- Auto routing now returns an explicit unavailable response when no healthy/capable target
+  exists instead of re-admitting an incompatible fallback target.
+
+
 - **feat(sse): STRICT_ZERO_COST** — opt-in, off-by-default `freeAccessPolicy: "strict"` setting
   that hard-verifies every auto-combo candidate against live quota state and per-connection
   economic safety before it can be dispatched, going beyond `hidePaidModels`'s static catalog

@@ -258,16 +258,42 @@ rate limit. Bounded by `comboCooldownWait` (`enabled`, `maxWaitMs`, `maxAttempts
 **Scope**: the local per-provider+connection rate-limit queue (`open-sse/services/rateLimitManager.ts`,
 backed by Bottleneck), one layer below the three mechanisms above.
 
-**`maxWaitMs` is a legacy persisted name for execution expiration.**
-`resilienceSettings.requestQueue.maxWaitMs` is passed to Bottleneck as a job
-`expiration`, whose timer starts only after dispatch. It therefore bounds
-limiter-managed execution, not time spent in the local queue. Expiration is
-surfaced as trusted local `code: "RATE_LIMIT_EXECUTION_TIMEOUT"` (HTTP 504);
-the former queue-timeout code name is accepted only for trusted internal
-backward compatibility. The default is 15000ms; override via
+**`maxWaitMs` is a legacy persisted name for the queue-wait deadline.**
+`resilienceSettings.requestQueue.maxWaitMs` bounds only time waiting for a
+Bottleneck slot. It is deliberately not passed as Bottleneck `expiration`,
+because that timer starts after dispatch and previously killed legitimate
+large-context executions after 15 seconds. An expired queued job is surfaced as
+trusted local `code: "RATE_LIMIT_QUEUE_TIMEOUT"` (HTTP 503) and its guarded
+callback cannot dispatch later. Provider, combo-target, and overall-combo
+timeouts remain separate post-dispatch controls. The default is 15000ms; override via
 `RATE_LIMIT_MAX_WAIT_MS` (env) or the dashboard (**Settings → Resilience**,
-1–30000ms UI ceiling). Queue residence has no time deadline; use
-`maxQueueDepth` below to bound queued callers.
+1–30000ms UI ceiling). Use `maxQueueDepth` below to additionally bound queued callers.
+
+### Hard and practical input limits
+
+Combo pre-dispatch compatibility rejects a candidate when the request exceeds a
+known hard `max_input_tokens`/context window. Unknown limits remain eligible.
+Operators may set the separate exact model override
+`practical_input_tokens` in **Settings → Model Overrides** for a conservative
+local operating threshold (for example, a free or sharply rate-limited account
+that is technically capable of more). This value is policy, not a provider
+guarantee; it is unset by default and never inferred from a provider name.
+
+### Bounded combo lifecycle
+
+The default combo-wide wall-clock deadline is 3 minutes and the fallback loop
+dispatches at most 12 provider attempts unless an operator deliberately sets a
+different `maxGlobalAttempts` value (still clamped to the existing hard safety
+cap). Per-target timeouts remain independent. Client disconnect propagates
+through the request `AbortSignal`; retry/cooldown/fallback waits remove their
+abort listeners when they settle, no later target is dispatched, and the
+current target is aborted where its transport supports cancellation.
+
+All combo safety timers are cleared on every terminal path. A rate-limiter job
+that cannot be removed from Bottleneck's v2 queue retains only a small guard
+callback after cancellation/queue timeout; the detachable provider-work slot is
+cleared immediately so queued work does not retain a large request body or later
+reach the provider.
 
 **`maxQueueDepth` — opt-in admission cap (new).** `resilienceSettings.requestQueue.maxQueueDepth`
 bounds how many requests may sit queued (not yet dispatched) for one
