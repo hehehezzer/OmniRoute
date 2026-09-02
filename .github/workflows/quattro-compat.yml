@@ -49,7 +49,10 @@ jobs:
           tests/unit/combo-context-window-filter.test.ts
           tests/unit/rate-limit-execution-timeout-message-4165.test.ts
       - name: Integration tests
-        run: npm run test:integration
+        run: >-
+          node --import tsx/esm --import ./open-sse/utils/setupPolyfill.ts
+          --import ./tests/_setup/isolateDataDir.ts --test --test-force-exit
+          --test-concurrency=1 tests/integration/quattro-routing-compat.test.ts
       - name: Production build
         run: npm run build
 
