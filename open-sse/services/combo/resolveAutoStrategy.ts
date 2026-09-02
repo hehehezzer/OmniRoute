@@ -317,8 +317,21 @@ export async function resolveAutoStrategyOrder(
     candidateRequirements,
     getTaskFitness
   );
+  // Quattro's list is the complete quality-floor/cost decision for this
+  // request (bounded to the envelope's 32-entry contract). When present,
+  // candidates outside it were not approved by Quattro's evidence gate and
+  // must not re-enter merely as an OmniRoute score fallback. OmniRoute still
+  // revalidates every preferred candidate at dispatch time.
+  const preferredIds = new Set(
+    (externalRouting?.preferredCandidates ?? []).map((entry) => entry.toLowerCase())
+  );
+  const externallyEligibleCandidates = preferredIds.size > 0
+    ? eligibleCandidates.filter((candidate) =>
+        preferredIds.has(`${candidate.provider}/${candidate.model}`.toLowerCase())
+      )
+    : eligibleCandidates;
   const routableCandidates = orderEligibleCandidatesByPreference(
-    eligibleCandidates,
+    externallyEligibleCandidates,
     externalRouting?.preferredCandidates ?? []
   );
   const blockedCount = candidates.length - routableCandidates.length;
@@ -387,6 +400,11 @@ export async function resolveAutoStrategyOrder(
       selectedModel = preferredCandidate.model;
       selectedConnectionId = preferredCandidate.connectionId ?? null;
       selectionReason = "first eligible external preference";
+      // A validated Quattro preference is an explicit upstream selection
+      // policy, not merely a hint for the first scorer. Preserve its primary
+      // target through downstream continuity stages; runtime health, quota,
+      // context, and capability checks may still skip it at dispatch.
+      autoUsedExplicitRouter = true;
     }
 
     if (!selectedProvider && routingStrategy !== "rules") {

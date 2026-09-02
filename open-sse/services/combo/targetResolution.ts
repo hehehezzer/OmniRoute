@@ -497,6 +497,13 @@ async function applyContinuityFilters(
   if (!cacheStrategyAffinityApplied) {
     orderedTargets = orderTargetsByEvalScores(orderedTargets, config.evalRouting, log);
   }
+  // Session stickiness and eval scores are continuity heuristics. They must
+  // not reorder a validated Quattro decision before the runtime hard gates
+  // run. If the preferred target becomes unhealthy, the attempt loop will
+  // skip it and continue through the remaining preferred targets.
+  if (relayOptions?.routingEnvelope && initialOrderedTargets[0]) {
+    orderedTargets = protectFirstTarget(orderedTargets, initialOrderedTargets[0]);
+  }
   // #8488 / #8494: fail closed when hard capability filters empty the pool.
   // Opt-in escape hatch: combo.config.compatFilterFailOpen OR settings.compatFilterFailOpen.
   const compatFilterFailOpen =
@@ -722,10 +729,16 @@ export async function resolveComboTargetPipeline(
 
   logTargetPoolSize(strategy, allCombos, orderedTargets, stickyWeightedKey, log);
 
-  const pipelineResponse = await dispatchSmartPipeline(
-    deps,
-    orderedTargets.map((target) => target.modelStr)
-  );
+  // A validated Quattro envelope has already performed the semantic quality
+  // and cost ordering. Smart/pipeline prelude dispatch has no envelope-aware
+  // candidate gate, so it must fall through to the normal auto resolver where
+  // the preferred order and runtime revalidation are enforced.
+  const pipelineResponse = deps.relayOptions?.routingEnvelope
+    ? null
+    : await dispatchSmartPipeline(
+        deps,
+        orderedTargets.map((target) => target.modelStr)
+      );
   if (pipelineResponse) return { earlyResponse: pipelineResponse };
 
   const ordering = await orderByStrategy(deps, orderedTargets);

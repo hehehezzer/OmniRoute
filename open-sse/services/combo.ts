@@ -790,7 +790,10 @@ async function handleComboChatInner({
   // falls through to the target iteration loop below. Implementations live in
   // combo/dispatchPrelude.ts; only the chaos + round-robin hand-offs are short
   // enough to stay inline.
-  if (pinnedModel) {
+  // Session context pins are continuity hints, not authority over an
+  // enhanced Quattro decision. Let the envelope-aware auto path revalidate
+  // and select the first preferred runtime candidate instead.
+  if (pinnedModel && !relayOptions?.routingEnvelope) {
     const pinnedDispatch = await tryPinnedModelDispatch({
       body,
       combo,

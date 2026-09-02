@@ -230,3 +230,63 @@ test("enhanced preferred ordering skips exhausted candidates and dispatches the 
     );
   }
 });
+
+test("enhanced preference remains primary even when a later candidate scores cheaper", async () => {
+  const preferred = {
+    ...candidate("codex", "luna", 5),
+    availability: "available" as const,
+    stepId: "luna",
+    executionKey: "luna-key",
+    modelStr: "codex/luna",
+    maxInputTokens: 128_000,
+  };
+  const later = {
+    ...candidate("codex", "sol", 1),
+    availability: "available" as const,
+    stepId: "sol",
+    executionKey: "sol-key",
+    modelStr: "codex/sol",
+    maxInputTokens: 128_000,
+  };
+  const unapproved = {
+    ...candidate("codex", "unapproved", 0.1),
+    availability: "available" as const,
+    stepId: "unapproved",
+    executionKey: "unapproved-key",
+    modelStr: "codex/unapproved",
+    maxInputTokens: 128_000,
+  };
+  const result = await resolveAutoStrategyOrder({
+    orderedTargets: [
+      { stepId: "luna", executionKey: "luna-key", kind: "model", provider: "codex", modelStr: "codex/luna" },
+      { stepId: "sol", executionKey: "sol-key", kind: "model", provider: "codex", modelStr: "codex/sol" },
+      { stepId: "unapproved", executionKey: "unapproved-key", kind: "model", provider: "codex", modelStr: "codex/unapproved" },
+    ] as never,
+    body: { messages: [{ role: "user", content: "say hello" }] },
+    combo: { id: "preference-primary-test", name: "preference-primary-test", config: {} } as never,
+    settings: null,
+    config: {},
+    relayOptions: {
+      routingEnvelope: {
+        schemaVersion: 1,
+        requiredCapabilities: [],
+        minimumContext: 2_000,
+        preferredCandidates: ["codex/luna", "codex/sol"],
+        preferenceMode: "balanced",
+        taskProfileId: "preference-primary-test",
+        tier: "FAST",
+        routingPolicyVersion: "quattro-routing-v2",
+      },
+    },
+    resilienceSettings: { quotaPreflight: { enabled: false } } as never,
+    log: { info() {}, warn() {}, debug() {} } as never,
+    buildAutoCandidates: (async () => [preferred, later, unapproved]) as never,
+  });
+
+  assert.ok("orderedTargets" in result);
+  if ("orderedTargets" in result) {
+    assert.equal(result.orderedTargets[0]?.modelStr, "codex/luna");
+    assert.equal(result.autoUsedExplicitRouter, true);
+    assert.equal(result.orderedTargets.some((target) => target.modelStr === "codex/unapproved"), false);
+  }
+});
