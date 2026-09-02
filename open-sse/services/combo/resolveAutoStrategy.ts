@@ -25,7 +25,10 @@ import {
 } from "../autoCombo/capabilityRequirements.ts";
 import { orderEligibleCandidatesByPreference } from "../autoCombo/routingEnvelope.ts";
 import { getTaskFitness } from "../autoCombo/taskFitness.ts";
-import { buildComplexityRoutingHint } from "../autoCombo/complexityRouter";
+import {
+  buildComplexityRoutingHint,
+  shouldApplyComplexityRoutingHint,
+} from "../autoCombo/complexityRouter";
 import { getModePack } from "../autoCombo/modePacks.ts";
 import { recordComboIntent } from "../comboMetrics.ts";
 import { estimateTokens } from "../contextManager.ts";
@@ -461,7 +464,12 @@ export async function resolveAutoStrategyOrder(
     // difficulty and feed a tier hint into scoring so tierAffinity /
     // specificityMatch favor candidates whose tier matches the request.
     const autoManifestHint: RoutingHint | null =
-      config.complexityAwareRouting === true
+      // Quattro is the task-intelligence authority for a validated routing
+      // envelope.  In particular, do not let the expanded Codex protocol
+      // (tools/system/history) turn a FAST task into a premium preference via
+      // the optional context-size specificity signal.  OmniRoute still owns
+      // every hard capability, context, health, quota, and fallback gate.
+      shouldApplyComplexityRoutingHint(config.complexityAwareRouting === true, externalRouting)
         ? buildComplexityRoutingHint(
             eligibleTargets.filter((t) => t.kind === "model"),
             body,

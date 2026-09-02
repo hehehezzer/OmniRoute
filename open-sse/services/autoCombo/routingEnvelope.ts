@@ -8,6 +8,8 @@ const MAX_ROUTING_HEADER_BYTES = 8_192;
 
 export const ROUTING_PREFERENCE_MODES = ["balanced"] as const;
 export type RoutingPreferenceMode = (typeof ROUTING_PREFERENCE_MODES)[number];
+export const QUATTRO_ROUTING_TIERS = ["FAST", "STANDARD", "REASONING"] as const;
+export type QuattroRoutingTier = (typeof QUATTRO_ROUTING_TIERS)[number];
 
 const candidateIdSchema = z
   .string()
@@ -38,6 +40,7 @@ const routingEnvelopeSchema = z
       .max(128)
       .regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/)
       .optional(),
+    tier: z.enum(QUATTRO_ROUTING_TIERS).optional(),
     routing_policy_version: z
       .string()
       .trim()
@@ -87,6 +90,7 @@ export interface RoutingPreferenceEnvelope {
   preferredCandidates: readonly string[];
   preferenceMode: RoutingPreferenceMode;
   taskProfileId: string | null;
+  tier: QuattroRoutingTier | null;
   routingPolicyVersion: string | null;
 }
 
@@ -171,6 +175,7 @@ export function extractRoutingPreferenceEnvelope(
       preferredCandidates: routing.preferred_candidates,
       preferenceMode: routing.preference_mode,
       taskProfileId: routing.task_profile_id ?? null,
+      tier: routing.tier ?? null,
       routingPolicyVersion: routing.routing_policy_version ?? null,
     },
   };

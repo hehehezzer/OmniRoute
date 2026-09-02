@@ -11,6 +11,7 @@ import {
   classifyRequestComplexity,
   escalateTier,
   buildComplexityRoutingHint,
+  shouldApplyComplexityRoutingHint,
 } from "../../open-sse/services/autoCombo/complexityRouter.ts";
 
 const NOOP_LOG = { info: () => {} };
@@ -104,4 +105,13 @@ test("buildComplexityRoutingHint — a null body is safe and still builds a tier
     ["free", "cheap", "premium"].includes(hint.recommendedMinTier),
     `unexpected tier ${hint.recommendedMinTier}`
   );
+});
+
+test("Quattro envelope owns task intelligence while OmniRoute keeps runtime gates", () => {
+  assert.equal(
+    shouldApplyComplexityRoutingHint(true, { routingPolicyVersion: "quattro-routing-v2" }),
+    false
+  );
+  assert.equal(shouldApplyComplexityRoutingHint(true, null), true);
+  assert.equal(shouldApplyComplexityRoutingHint(false, null), false);
 });

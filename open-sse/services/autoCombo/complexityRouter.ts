@@ -24,6 +24,19 @@ import { generateRoutingHints, type RoutingHint } from "../manifestAdapter";
 
 export type ComplexityTier = "free" | "cheap" | "premium";
 
+/**
+ * Quattro owns task-intelligence when its validated routing envelope is
+ * present.  OmniRoute must still run hard runtime gates, but its optional
+ * prompt-specific complexity hint must not reinterpret Codex protocol size as
+ * a premium-quality requirement.
+ */
+export function shouldApplyComplexityRoutingHint(
+  enabled: boolean,
+  routingEnvelope?: { routingPolicyVersion?: string | null } | null
+): boolean {
+  return enabled && routingEnvelope?.routingPolicyVersion !== "quattro-routing-v2";
+}
+
 export interface ComplexityClassification {
   /** 0..100 specificity / difficulty score. */
   score: number;
