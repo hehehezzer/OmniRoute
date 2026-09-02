@@ -12,6 +12,8 @@ const core = await import("../../../src/lib/db/core.ts");
 const apiKeys = await import("../../../src/lib/db/apiKeys.ts");
 const capabilitiesRoute = await import("../../../src/app/api/v1/capabilities/route.ts");
 const candidatesRoute = await import("../../../src/app/api/v1/routing/candidates/route.ts");
+const candidateProjection = await import("../../../open-sse/handlers/autoComboCandidates.ts");
+const routingDiagnostics = await import("../../../src/app/api/v1/explain/routing/route.ts");
 const candidateHandler = await import("../../../open-sse/handlers/autoComboCandidates.ts");
 
 function collectKeys(value: unknown, output = new Set<string>()): Set<string> {
@@ -41,6 +43,7 @@ test("capability negotiation advertises the additive contract", async () => {
   assert.equal(body.capabilities.candidate_snapshot, true);
   assert.equal(body.capabilities.routing_requirements, true);
   assert.equal(body.capabilities.preferred_candidates, true);
+  assert.equal(body.capabilities.routing_header_transport, true);
   assert.equal(response.headers.get("cache-control"), "no-store");
 });
 
@@ -72,6 +75,27 @@ test("public candidate identifiers reject account-like or unsafe values", () => 
   assert.equal(candidateHandler.isPublicCandidateIdentifier("codex", "gpt-5.6-sol"), true);
   assert.equal(candidateHandler.isPublicCandidateIdentifier("user@example.com", "model"), false);
   assert.equal(candidateHandler.isPublicCandidateIdentifier("provider", "account label"), false);
+});
+
+test("candidate preference identity matches runtime provider/model identity", () => {
+  assert.equal(
+    candidateProjection.normalizeCandidateModelId("codex", "codex/gpt-5.6-luna"),
+    "gpt-5.6-luna"
+  );
+  assert.equal(
+    candidateProjection.normalizeCandidateModelId("antigravity", "gemini-3.1-pro"),
+    "gemini-3.1-pro"
+  );
+});
+
+test("routing diagnostics never expose connection identifiers", () => {
+  const sanitized = routingDiagnostics.sanitizeRoutingEvent({
+    provider: "codex",
+    model: "gpt-test",
+    connectionId: "private-connection-id",
+  });
+  assert.equal("connectionId" in sanitized, false);
+  assert.equal(JSON.stringify(sanitized).includes("private-connection-id"), false);
 });
 
 test("candidate snapshot rejects invalid channel input with a sanitized error", async () => {

@@ -26,6 +26,7 @@ import {
   initRoutingObservability,
   classifyQuality,
 } from "@omniroute/open-sse/services/routing/index.ts";
+import { recentAdaptiveRoutingReceipts } from "@omniroute/open-sse/services/autoCombo/routingEnvelope.ts";
 
 export async function OPTIONS() {
   return new Response(null, {
@@ -34,6 +35,12 @@ export async function OPTIONS() {
       "Access-Control-Allow-Headers": "*",
     },
   });
+}
+
+export function sanitizeRoutingEvent<T extends Record<string, unknown>>(event: T) {
+  const sanitized: Record<string, unknown> = { ...event };
+  delete sanitized.connectionId;
+  return sanitized;
 }
 
 export async function GET(request: Request) {
@@ -60,7 +67,10 @@ export async function GET(request: Request) {
         object: "routing_explain",
         sinks,
         otelEnabled,
-        events: recentRoutingEvents(limit),
+        events: recentRoutingEvents(limit).map((event) =>
+          sanitizeRoutingEvent(event as unknown as Record<string, unknown>)
+        ),
+        adaptive: recentAdaptiveRoutingReceipts(limit),
         quality,
         otel: routingOtelStats(),
       },

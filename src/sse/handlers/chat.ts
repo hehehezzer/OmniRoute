@@ -40,7 +40,11 @@ import {
 import type { ComboLike, SingleModelTarget } from "@omniroute/open-sse/services/combo/types.ts";
 import { mergeAbortSignals } from "@omniroute/open-sse/executors/base.ts";
 import { resolveRequestAutoControls } from "@omniroute/open-sse/services/autoCombo/requestControls.ts";
-import { extractRoutingPreferenceEnvelope } from "@omniroute/open-sse/services/autoCombo/routingEnvelope.ts";
+import {
+  applyRoutingPreferenceHeader,
+  expandEnhancedAutoRoute,
+  extractRoutingPreferenceEnvelope,
+} from "@omniroute/open-sse/services/autoCombo/routingEnvelope.ts";
 import { isVerifiedNativeCodexRequest } from "@omniroute/open-sse/config/codexIdentity.ts";
 import { resolveCompressionSettings } from "@omniroute/open-sse/handlers/chatCore/compressionSettings.ts";
 import type { CompressionExclusions } from "@omniroute/open-sse/services/compression/exclusions.ts";
@@ -394,12 +398,24 @@ async function handleChatImplementation(
   // compatible with the standard path.
   let routingEnvelope = null;
   if (body && typeof body === "object" && !Array.isArray(body)) {
-    const extractedRouting = extractRoutingPreferenceEnvelope(body as Record<string, unknown>);
+    const headerRouting = applyRoutingPreferenceHeader(
+      body as Record<string, unknown>,
+      request.headers
+    );
+    if (!headerRouting.success) {
+      return errorResponse(HTTP_STATUS.BAD_REQUEST, headerRouting.message);
+    }
+    const extractedRouting = extractRoutingPreferenceEnvelope(headerRouting.body);
     if (!extractedRouting.success) {
       return errorResponse(HTTP_STATUS.BAD_REQUEST, extractedRouting.message);
     }
     body = extractedRouting.body;
     routingEnvelope = extractedRouting.envelope;
+    // A Quattro tier alias is the standard-mode fallback contract. Once a
+    // validated enhanced envelope is present, expand that alias to the full
+    // auto inventory so its ordered provider/model preferences can actually be
+    // considered. Hard capability/context/runtime gates still run afterward.
+    body = expandEnhancedAutoRoute(body, routingEnvelope);
   }
 
   const sourceFormat = detectFormatFromUrl(body, request.url);

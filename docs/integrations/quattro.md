@@ -39,6 +39,18 @@ cookies, raw provider errors, private configuration, or account/connection ident
 
 ## Optional routing envelope
 
+Codex clients that cannot add a Responses body extension may send the exact
+same schema as bounded JSON in `X-Quattro-Routing`. Codex supports this without
+a patch through custom-provider `env_http_headers`; OmniRoute rejects duplicate
+body/header envelopes, validates the header identically, and strips it before
+provider translation. `GET /api/v1/capabilities` advertises this as
+`routing_header_transport`.
+
+For validated enhanced envelopes on an `auto/...` tier alias, OmniRoute expands
+the request to the complete base auto inventory before applying the envelope's
+hard requirements and ordered preferences. Ordinary clients without an
+envelope retain the original tier-route behavior.
+
 Chat Completions and Responses requests may include a top-level `routing` object:
 
 ```json

@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyRoutingPreferenceHeader,
   extractRoutingPreferenceEnvelope,
+  expandEnhancedAutoRoute,
   orderEligibleCandidatesByPreference,
+  recentAdaptiveRoutingReceipts,
+  recordAdaptiveRoutingReceipt,
+  resetAdaptiveRoutingReceipts,
 } from "../../../open-sse/services/autoCombo/routingEnvelope.ts";
 import {
   evaluateCandidateEligibility,
@@ -115,6 +120,69 @@ test("routing envelope rejects unknown capabilities and bounded-array abuse", ()
   assert.equal(tooManyCandidates.success, false);
 });
 
+test("Codex dynamic header transport reuses the body envelope validator", () => {
+  const routing = {
+    schema_version: 1,
+    requirements: { capabilities: ["code_execution"], minimum_context: 8_000 },
+    preferred_candidates: ["codex/luna", "codex/sol"],
+    preference_mode: "balanced",
+    task_profile_id: "task-42",
+    routing_policy_version: "quattro-routing-v2",
+  };
+  const applied = applyRoutingPreferenceHeader(
+    { model: "auto", input: "bounded task" },
+    new Headers({ "X-Quattro-Routing": JSON.stringify(routing) })
+  );
+  assert.equal(applied.success, true);
+  if (applied.success) {
+    const extracted = extractRoutingPreferenceEnvelope(applied.body);
+    assert.equal(extracted.success, true);
+    if (extracted.success) assert.equal(extracted.envelope?.taskProfileId, "task-42");
+  }
+  assert.equal(
+    applyRoutingPreferenceHeader(
+      { model: "auto", input: "x", routing },
+      new Headers({ "X-Quattro-Routing": JSON.stringify(routing) })
+    ).success,
+    false
+  );
+});
+
+test("validated enhanced envelopes expand tier aliases without changing standard requests", () => {
+  const standard = { model: "auto/coding:cheap", input: "x" };
+  assert.equal(expandEnhancedAutoRoute(standard, null), standard);
+  const extracted = extractRoutingPreferenceEnvelope({
+    ...standard,
+    routing: { schema_version: 1, requirements: {}, preferred_candidates: [] },
+  });
+  assert.equal(extracted.success, true);
+  if (extracted.success) {
+    assert.equal(expandEnhancedAutoRoute(extracted.body, extracted.envelope).model, "auto");
+  }
+});
+
+test("adaptive receipt is bounded to sanitized routing decisions", () => {
+  resetAdaptiveRoutingReceipts();
+  const extracted = extractRoutingPreferenceEnvelope({
+    routing: {
+      schema_version: 1,
+      requirements: {},
+      preferred_candidates: ["codex/luna", "codex/sol"],
+      task_profile_id: "task-42",
+      routing_policy_version: "quattro-routing-v2",
+    },
+  });
+  assert.equal(extracted.success, true);
+  if (extracted.success && extracted.envelope) {
+    recordAdaptiveRoutingReceipt(extracted.envelope, [
+      { target: "codex/luna", decision: "skipped_before_dispatch", reason: "quota_cutoff" },
+      { target: "codex/sol", decision: "dispatched" },
+    ]);
+  }
+  assert.deepEqual(recentAdaptiveRoutingReceipts(1)[0]?.selected_candidate, "codex/sol");
+  assert.equal(JSON.stringify(recentAdaptiveRoutingReceipts(1)).includes("task-42"), true);
+});
+
 test("preferred candidates reorder only the already eligible pool", () => {
   const eligible = [
     { provider: "codex", model: "sol" },
@@ -143,6 +211,26 @@ test("quota-exhausted preference is skipped before preference ordering", () => {
   assert.deepEqual(
     ordered.map((entry) => `${entry.provider}/${entry.model}`),
     ["deepseek/v4", "codex/sol"]
+  );
+});
+
+test("stale preferred winner is revalidated and next eligible candidate wins", () => {
+  const preferred = ["codex/luna", "codex/sol"];
+  const initial = [candidate("codex", "luna", "available"), candidate("codex", "sol", "available")];
+  assert.equal(
+    orderEligibleCandidatesByPreference(
+      filterEligibleCapableCandidates(initial, { taskType: "default" }, () => 0.9),
+      preferred
+    )[0]?.model,
+    "luna"
+  );
+  const atDispatch = [{ ...initial[0], availability: "unhealthy" as const }, initial[1]];
+  assert.equal(
+    orderEligibleCandidatesByPreference(
+      filterEligibleCapableCandidates(atDispatch, { taskType: "default" }, () => 0.9),
+      preferred
+    )[0]?.model,
+    "sol"
   );
 });
 

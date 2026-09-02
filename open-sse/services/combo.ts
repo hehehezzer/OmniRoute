@@ -134,6 +134,7 @@ import {
 import type { ComboErrorEntry } from "./combo/comboErrorAggregation.ts";
 import type { CompressionMode } from "./compression/types.ts";
 import { getCachedProviderConnections } from "../../src/lib/db/readCache";
+import { getModelSpec } from "../../src/shared/constants/modelSpecs";
 import { isProviderInCooldown, recordProviderCooldown } from "./providerCooldownTracker.ts";
 import {
   resolveResilienceSettings,
@@ -261,6 +262,7 @@ import {
   recordComboDecision,
   startComboTrace,
 } from "./combo/decisionTrace.ts";
+import { recordAdaptiveRoutingReceipt } from "./autoCombo/routingEnvelope.ts";
 import {
   QUOTA_SOFT_DEPRIORITIZE_FACTOR,
   setCandidateQuotaSoftPenalty,
@@ -463,6 +465,10 @@ export async function buildAutoCandidates(
       const parsed = parseModel(modelStr);
       const provider = target.provider || parsed.provider || parsed.providerAlias || "unknown";
       const model = parsed.model || modelStr;
+      const metadataModel = model.startsWith(`${provider}/`)
+        ? model.slice(provider.length + 1)
+        : model;
+      const modelSpec = getModelSpec(metadataModel);
       const historicalKey = `${provider}/${model}`;
       const historicalModelMetric = historicalLatencyStats[historicalKey] || null;
       const historicalTotal = Number(historicalModelMetric?.totalRequests);
@@ -624,6 +630,7 @@ export async function buildAutoCandidates(
         // Feedback-driven quality signal (routing quality tracker). Neutral 1.0
         // before enough samples accumulate — a cold model is never penalized.
         quality: qualityScoreFor(provider, model),
+        maxInputTokens: modelSpec?.contextWindow ?? null,
       };
     })
   );
@@ -705,6 +712,17 @@ export async function handleComboChat(options: HandleComboChatOptions): Promise<
   const response = await handleComboChatInner({ ...options, invocationId: traceInvocationId });
   response.headers.set("X-OmniRoute-Combo-Trace", traceInvocationId);
   const trace = getComboTrace(traceInvocationId);
+  const envelope = options.relayOptions?.routingEnvelope;
+  if (envelope) {
+    recordAdaptiveRoutingReceipt(
+      envelope,
+      (trace?.decisions ?? []).map(({ target, decision, reason }) => ({
+        target,
+        decision,
+        ...(reason ? { reason } : {}),
+      }))
+    );
+  }
   options.log.info(
     "COMBO",
     `combo trace ${traceInvocationId} terminal=${JSON.stringify(trace?.terminal ?? null)} decisions=${trace?.decisions.length ?? 0}`

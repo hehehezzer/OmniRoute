@@ -28,6 +28,7 @@ export async function GET(request: Request) {
         cost_metadata: true,
         quota_state: true,
         routing_diagnostics: true,
+        routing_header_transport: true,
       },
       endpoints: {
         candidate_snapshot: "/api/v1/routing/candidates?channel=auto",

@@ -22,6 +22,7 @@ import { getProviderConnectionById } from "@/lib/db/providers";
 import { getExcludedConnectionIds } from "@/lib/db/autoCandidateOverrides";
 import { getCanonicalModelMetadata } from "@/lib/modelMetadataRegistry";
 import { getPricingForModel } from "@/shared/constants/pricing";
+import { getProviderAlias } from "@/shared/constants/providers";
 import { getProviderExecutionCapabilities } from "@omniroute/open-sse/services/autoCombo/capabilityRequirements.ts";
 
 export const CANDIDATE_SNAPSHOT_SCHEMA_VERSION = 1 as const;
@@ -89,6 +90,10 @@ export interface CandidateVisibilityPolicy {
   /** Empty/null preserves OmniRoute's allow-all connection semantics. */
   allowedConnectionIds?: readonly string[] | null;
   isModelAllowed?: (model: string) => Promise<boolean>;
+}
+
+export function normalizeCandidateModelId(provider: string, model: string): string {
+  return model.startsWith(`${provider}/`) ? model.slice(provider.length + 1) : model;
 }
 
 function hasFutureRateLimit(value: unknown): boolean {
@@ -246,7 +251,7 @@ function finitePrice(value: unknown): number | null {
 }
 
 function sanitizedPricing(provider: string, model: string): SanitizedCandidateView["pricing"] {
-  const raw = getPricingForModel(provider, model);
+  const raw = getPricingForModel(getProviderAlias(provider), model);
   const input = finitePrice(raw?.input);
   const output = finitePrice(raw?.output);
   const cached = finitePrice(raw?.cached ?? raw?.cached_input);
@@ -294,8 +299,12 @@ export async function getSanitizedAutoComboCandidateSnapshot(
     .filter((entries) => isPublicCandidateIdentifier(entries[0].provider, entries[0].model))
     .map((entries): SanitizedCandidateView => {
       const first = entries[0];
-      const metadata = getCanonicalModelMetadata({ provider: first.provider, model: first.model });
-      const execution = getProviderExecutionCapabilities(first.provider, first.model);
+      // Auto inventories may retain an already provider-qualified model string
+      // (for example `codex/gpt-*`). Normalize only for metadata lookup while
+      // preserving the exact provider/model identity used by preference routing.
+      const metadataModel = normalizeCandidateModelId(first.provider, first.model);
+      const metadata = getCanonicalModelMetadata({ provider: first.provider, model: metadataModel });
+      const execution = getProviderExecutionCapabilities(first.provider, metadataModel);
       const anyAvailable = entries.some((entry) => entry.reachable && !entry.excluded);
       const anyCooldown = entries.some((entry) => entry.connectionCooldown || entry.modelLocked);
       const reasons = [...new Set(entries.flatMap(rejectionReasons))];
@@ -308,8 +317,8 @@ export async function getSanitizedAutoComboCandidateSnapshot(
         execution.repositoryAccess;
       return {
         provider_id: first.provider,
-        model_id: first.model,
-        route: `${first.provider}/${first.model}`,
+        model_id: metadataModel,
+        route: `${first.provider}/${metadataModel}`,
         capabilities: {
           reasoning: metadata?.capabilities.reasoning ?? execution.reasoning,
           vision: metadata?.capabilities.vision ?? null,
@@ -324,7 +333,7 @@ export async function getSanitizedAutoComboCandidateSnapshot(
         },
         tool_support: metadata?.capabilities.toolCalling ?? false,
         execution_support: executionSupport,
-        pricing: sanitizedPricing(first.provider, first.model),
+        pricing: sanitizedPricing(first.provider, metadataModel),
         health_state: anyAvailable ? "available" : anyCooldown ? "cooldown" : "unhealthy",
         quota_state: anyAvailable ? "available" : anyCooldown ? "unavailable" : "unknown",
         cooldown_state: anyCooldown,
