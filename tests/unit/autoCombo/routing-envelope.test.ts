@@ -5,10 +5,12 @@ import {
   applyRoutingPreferenceHeader,
   extractRoutingPreferenceEnvelope,
   expandEnhancedAutoRoute,
+  normalizeRoutingPreferenceMode,
   orderEligibleCandidatesByPreference,
   recentAdaptiveRoutingReceipts,
   recordAdaptiveRoutingReceipt,
   resetAdaptiveRoutingReceipts,
+  usesEnhancedRouting,
 } from "../../../open-sse/services/autoCombo/routingEnvelope.ts";
 import {
   evaluateCandidateEligibility,
@@ -71,6 +73,29 @@ test("enhanced routing envelope is validated, normalized, and stripped from prov
       "code_execution",
     ]);
     assert.equal(result.envelope?.minimumContext, 120_000);
+    assert.equal(result.envelope?.preferenceMode, "balanced");
+    assert.equal(usesEnhancedRouting(result.envelope), true);
+  }
+});
+
+test("legacy preference mode normalizes to canonical passthrough", () => {
+  assert.equal(normalizeRoutingPreferenceMode("legacy"), "passthrough");
+  assert.equal(normalizeRoutingPreferenceMode("passthrough"), "passthrough");
+
+  const result = extractRoutingPreferenceEnvelope({
+    model: "auto/coding:cheap",
+    routing: {
+      schema_version: 1,
+      requirements: {},
+      preferred_candidates: [],
+      preference_mode: "legacy",
+    },
+  });
+
+  assert.equal(result.success, true);
+  if (result.success) {
+    assert.equal(result.envelope?.preferenceMode, "passthrough");
+    assert.equal(usesEnhancedRouting(result.envelope), false);
   }
 });
 
@@ -158,6 +183,27 @@ test("validated enhanced envelopes expand tier aliases without changing standard
   assert.equal(extracted.success, true);
   if (extracted.success) {
     assert.equal(expandEnhancedAutoRoute(extracted.body, extracted.envelope).model, "auto");
+  }
+});
+
+test("passthrough envelopes preserve auto aliases", () => {
+  const original = { model: "auto/coding:cheap", input: "x" };
+  const extracted = extractRoutingPreferenceEnvelope({
+    ...original,
+    routing: {
+      schema_version: 1,
+      requirements: {},
+      preferred_candidates: [],
+      preference_mode: "passthrough",
+    },
+  });
+
+  assert.equal(extracted.success, true);
+  if (extracted.success) {
+    assert.equal("routing" in extracted.body, false);
+    assert.equal(extracted.envelope?.preferenceMode, "passthrough");
+    assert.equal(expandEnhancedAutoRoute(extracted.body, extracted.envelope), extracted.body);
+    assert.equal(extracted.body.model, original.model);
   }
 });
 

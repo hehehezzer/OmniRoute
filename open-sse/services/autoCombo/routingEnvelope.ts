@@ -6,8 +6,9 @@ export const ROUTING_ENVELOPE_SCHEMA_VERSION = 1 as const;
 export const QUATTRO_ROUTING_HEADER = "x-quattro-routing";
 const MAX_ROUTING_HEADER_BYTES = 8_192;
 
-export const ROUTING_PREFERENCE_MODES = ["balanced"] as const;
-export type RoutingPreferenceMode = (typeof ROUTING_PREFERENCE_MODES)[number];
+export const ROUTING_PREFERENCE_MODES = ["balanced", "passthrough", "legacy"] as const;
+export type RoutingPreferenceModeInput = (typeof ROUTING_PREFERENCE_MODES)[number];
+export type RoutingPreferenceMode = Exclude<RoutingPreferenceModeInput, "legacy">;
 export const QUATTRO_ROUTING_TIERS = ["FAST", "STANDARD", "REASONING"] as const;
 export type QuattroRoutingTier = (typeof QUATTRO_ROUTING_TIERS)[number];
 
@@ -94,6 +95,18 @@ export interface RoutingPreferenceEnvelope {
   routingPolicyVersion: string | null;
 }
 
+/** Normalize accepted compatibility names before routing policy is evaluated. */
+export function normalizeRoutingPreferenceMode(
+  mode: RoutingPreferenceModeInput
+): RoutingPreferenceMode {
+  return mode === "legacy" ? "passthrough" : mode;
+}
+
+/** Only balanced envelopes activate enhanced candidate expansion, gates, and ordering. */
+export function usesEnhancedRouting(envelope: RoutingPreferenceEnvelope | null): boolean {
+  return envelope?.preferenceMode === "balanced";
+}
+
 export interface AdaptiveRoutingReceipt {
   task_profile_id: string;
   routing_policy_version: string | null;
@@ -173,7 +186,7 @@ export function extractRoutingPreferenceEnvelope(
       requiredCapabilities: routing.requirements.capabilities as ExecutionCapability[],
       minimumContext: routing.requirements.minimum_context ?? null,
       preferredCandidates: routing.preferred_candidates,
-      preferenceMode: routing.preference_mode,
+      preferenceMode: normalizeRoutingPreferenceMode(routing.preference_mode),
       taskProfileId: routing.task_profile_id ?? null,
       tier: routing.tier ?? null,
       routingPolicyVersion: routing.routing_policy_version ?? null,
@@ -212,7 +225,9 @@ export function expandEnhancedAutoRoute(
   input: Record<string, unknown>,
   envelope: RoutingPreferenceEnvelope | null
 ): Record<string, unknown> {
-  return envelope && typeof input.model === "string" && input.model.startsWith("auto/")
+  return usesEnhancedRouting(envelope) &&
+    typeof input.model === "string" &&
+    input.model.startsWith("auto/")
     ? { ...input, model: "auto" }
     : input;
 }

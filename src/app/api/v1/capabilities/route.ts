@@ -29,6 +29,8 @@ export async function GET(request: Request) {
         quota_state: true,
         routing_diagnostics: true,
         routing_header_transport: true,
+        routing_preference_modes: ["balanced", "passthrough"],
+        routing_preference_mode_aliases: { legacy: "passthrough" },
       },
       endpoints: {
         candidate_snapshot: "/api/v1/routing/candidates?channel=auto",

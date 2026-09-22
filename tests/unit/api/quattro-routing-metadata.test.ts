@@ -44,6 +44,10 @@ test("capability negotiation advertises the additive contract", async () => {
   assert.equal(body.capabilities.routing_requirements, true);
   assert.equal(body.capabilities.preferred_candidates, true);
   assert.equal(body.capabilities.routing_header_transport, true);
+  assert.deepEqual(body.capabilities.routing_preference_modes, ["balanced", "passthrough"]);
+  assert.deepEqual(body.capabilities.routing_preference_mode_aliases, {
+    legacy: "passthrough",
+  });
   assert.equal(response.headers.get("cache-control"), "no-store");
 });
 

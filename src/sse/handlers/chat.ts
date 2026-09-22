@@ -44,6 +44,7 @@ import {
   applyRoutingPreferenceHeader,
   expandEnhancedAutoRoute,
   extractRoutingPreferenceEnvelope,
+  usesEnhancedRouting,
 } from "@omniroute/open-sse/services/autoCombo/routingEnvelope.ts";
 import { isVerifiedNativeCodexRequest } from "@omniroute/open-sse/config/codexIdentity.ts";
 import { resolveCompressionSettings } from "@omniroute/open-sse/handlers/chatCore/compressionSettings.ts";
@@ -1053,7 +1054,7 @@ async function handleChatImplementation(
       ...(combo.strategy === "context-relay" ? { config: relayConfig } : {}),
       ...(bypassProviderQuotaPolicy ? { bypassProviderQuotaPolicy: true } : {}),
       ...perRequestAutoControls,
-      ...(routingEnvelope ? { routingEnvelope } : {}),
+      ...(usesEnhancedRouting(routingEnvelope) ? { routingEnvelope } : {}),
     };
     telemetry.endPhase();
 
