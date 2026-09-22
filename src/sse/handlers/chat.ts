@@ -136,9 +136,11 @@ import { getComboFailureLogError } from "./comboFailureLogging";
 import { getProviderConnectionById } from "@/lib/db/providers";
 import {
   extractLockedRoutingRequest,
+  normalizeLockedException,
   lockedFailureResponse,
   normalizeLockedFailure,
   recordLockedTargetReceipt,
+  resolveConnectionAccountIdentity,
   resolveLockedComboTarget,
   withLockedTargetEvidence,
   type LockedExecutionTarget,
@@ -734,62 +736,83 @@ async function handleChatImplementation(
   // Quattro-authoritative requests bypass every target-changing router. The route
   // must be a single account-pinned combo whose DB connection agrees with the lock.
   if (lockedRoutingRequest) {
+    let actual: LockedExecutionTarget | null = null;
     const failLocked = async (
       type: Parameters<typeof lockedFailureResponse>[0],
       retryable = false
     ) => {
-      const response = lockedFailureResponse(type, retryable);
+      const response = lockedFailureResponse(
+        type,
+        retryable,
+        null,
+        503,
+        actual,
+        lockedRoutingRequest!.target
+      );
       await recordLockedTargetReceipt(lockedRoutingRequest!, response, null);
       return response;
     };
-    const lockedCombo = await getComboByName(lockedRoutingRequest.target.route);
-    const allCombos = await getCombos();
-    if (!lockedCombo) return failLocked("MODEL_UNAVAILABLE");
-    const resolvedTarget = resolveLockedComboTarget(lockedCombo, allCombos, lockedRoutingRequest);
-    if (!resolvedTarget?.connectionId) return failLocked("CAPABILITY_UNSUPPORTED");
-    const connection = (await getProviderConnectionById(resolvedTarget.connectionId)) as Record<
-      string,
-      unknown
-    > | null;
-    if (!connection || connection.isActive === false) return failLocked("ACCOUNT_UNAVAILABLE");
-    const routeAccount = lockedCombo.name.split("/", 1)[0] || "";
-    if (
-      connection.provider !== lockedRoutingRequest.target.provider ||
-      routeAccount !== lockedRoutingRequest.target.account
-    ) {
-      return failLocked("ACCOUNT_UNAVAILABLE");
-    }
-    const resolvedModel = parseModel(resolvedTarget.modelStr);
-    const actual: LockedExecutionTarget = {
-      provider: String(connection.provider),
-      account: routeAccount,
-      model: resolvedModel.model || resolvedTarget.modelStr,
-      route: lockedCombo.name,
-      connectionId: resolvedTarget.connectionId,
-    };
-    const lockedResponse = await handleSingleModelChat(
-      { ...body, model: `${actual.provider}/${actual.model}` },
-      `${actual.provider}/${actual.model}`,
-      clientRawRequest,
-      request,
-      null,
-      apiKeyInfo,
-      telemetry,
-      {
-        sessionId,
-        sessionAffinityKey,
-        forcedConnectionId: actual.connectionId,
-        allowedConnectionIds: [actual.connectionId],
-        correlationId: reqId,
-        conversationId,
-        managedLease,
-        lockedTarget: actual,
+    try {
+      const lockedCombo = await getComboByName(lockedRoutingRequest.target.route);
+      const allCombos = await getCombos();
+      if (!lockedCombo) return failLocked("MODEL_UNAVAILABLE");
+      const resolvedTarget = resolveLockedComboTarget(
+        lockedCombo as ComboLike,
+        allCombos,
+        lockedRoutingRequest
+      );
+      if (!resolvedTarget?.connectionId) return failLocked("CAPABILITY_UNSUPPORTED");
+      const connection = (await getProviderConnectionById(resolvedTarget.connectionId)) as Record<
+        string,
+        unknown
+      > | null;
+      if (!connection || connection.isActive === false) {
+        return failLocked("ACCOUNT_UNAVAILABLE");
       }
-    );
-    const normalized = await normalizeLockedFailure(lockedResponse, actual);
-    const evidenced = withLockedTargetEvidence(normalized, actual);
-    await recordLockedTargetReceipt(lockedRoutingRequest, evidenced, actual);
-    return evidenced;
+      const actualProvider = String(connection.provider ?? "");
+      const actualAccount = resolveConnectionAccountIdentity(connection);
+      if (
+        actualProvider !== lockedRoutingRequest.target.provider ||
+        actualAccount !== lockedRoutingRequest.target.account
+      ) {
+        return failLocked("ACCOUNT_UNAVAILABLE");
+      }
+      const resolvedModel = parseModel(resolvedTarget.modelStr);
+      actual = {
+        provider: actualProvider,
+        account: actualAccount,
+        model: resolvedModel.model || resolvedTarget.modelStr,
+        route: String(lockedCombo.name),
+        connectionId: resolvedTarget.connectionId,
+      };
+      const lockedResponse = await handleSingleModelChat(
+        { ...body, model: `${actual.provider}/${actual.model}` },
+        `${actual.provider}/${actual.model}`,
+        clientRawRequest,
+        request,
+        null,
+        apiKeyInfo,
+        telemetry,
+        {
+          sessionId,
+          sessionAffinityKey,
+          forcedConnectionId: actual.connectionId,
+          allowedConnectionIds: [actual.connectionId],
+          correlationId: reqId,
+          conversationId: null,
+          managedLease,
+          lockedTarget: actual,
+        }
+      );
+      const normalized = await normalizeLockedFailure(lockedResponse, actual);
+      const evidenced = withLockedTargetEvidence(normalized, actual);
+      await recordLockedTargetReceipt(lockedRoutingRequest, evidenced, actual);
+      return evidenced;
+    } catch (error) {
+      const failure = normalizeLockedException(error, actual, lockedRoutingRequest!.target);
+      await recordLockedTargetReceipt(lockedRoutingRequest, failure, actual);
+      return failure;
+    }
   }
 
   // OmniRoute-native `previous_response_id` continuation: reconstruct the
@@ -1525,6 +1548,15 @@ async function handleSingleModelChat(
   // to combo flow. This handles the case where the auto-fuzzy match in
   // resolveModelOrError found a combo but the main handler's combo lookup missed it.
   if ((resolved as any).combo) {
+    if (runtimeOptions.lockedTarget) {
+      return lockedFailureResponse(
+        "CAPABILITY_UNSUPPORTED",
+        false,
+        null,
+        503,
+        runtimeOptions.lockedTarget
+      );
+    }
     const redirectCombo = (resolved as any).combo;
     if (runtimeOptions.managedLease) return managedComboRejection();
     log.info(
