@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { parseModel } from "./model.ts";
 import type { ComboCollectionLike, ComboLike, ResolvedComboTarget } from "./combo/types.ts";
 import { resolveComboTargets } from "./combo/comboStructure.ts";
@@ -21,7 +22,11 @@ export type LockedRoutingTarget = {
   model: string;
   route: string;
 };
-export type LockedRoutingRequest = { planId: string | null; target: LockedRoutingTarget };
+export type LockedRoutingRequest = {
+  planId: string | null;
+  receiptToken: string | null;
+  target: LockedRoutingTarget;
+};
 export type LockedExecutionTarget = LockedRoutingTarget & { connectionId: string };
 export type LockedTargetReceipt = {
   plan_id: string;
@@ -35,9 +40,52 @@ export type LockedTargetReceipt = {
   received_at: string;
 };
 const lockedReceipts: LockedTargetReceipt[] = [];
+const lockedReceiptTokenHashes = new WeakMap<LockedTargetReceipt, string>();
 type RoutingBody = Record<string, unknown> & { routing?: Record<string, unknown> };
 const requiredString = (value: unknown): string | null =>
   typeof value === "string" && value.trim() ? value.trim() : null;
+
+export const OMNIROUTE_ROUTING_MODE_ENV = "OMNIROUTE_ROUTING_MODE";
+export const OMNIROUTE_ROUTING_MODES = ["passthrough", "legacy"] as const;
+export type OmniRouteRoutingMode = (typeof OMNIROUTE_ROUTING_MODES)[number];
+
+/**
+ * The gateway defaults to the Quattro-authoritative path. Legacy routing is
+ * still available for older clients, but a locked Quattro request is rejected
+ * rather than silently being routed by the legacy engine.
+ */
+export function resolveOmniRouteRoutingMode(
+  value: unknown = process.env[OMNIROUTE_ROUTING_MODE_ENV]
+): OmniRouteRoutingMode | null {
+  const mode = typeof value === "string" && value.trim()
+    ? value.trim().toLowerCase()
+    : "passthrough";
+  return (OMNIROUTE_ROUTING_MODES as readonly string[]).includes(mode)
+    ? (mode as OmniRouteRoutingMode)
+    : null;
+}
+
+const receiptTokenHash = (value: string): string =>
+  createHash("sha256").update(value, "utf8").digest("hex");
+
+/** A legacy Quattro plan ID is accepted as a bearer capability only when it
+ * contains a request-unique UUID. New clients may send a separate receiptToken.
+ */
+export function resolveReceiptCapability(
+  planId: string | null,
+  token: unknown
+): string | null {
+  const explicit = requiredString(token);
+  if (explicit && explicit.length >= 32) return explicit;
+  if (
+    planId &&
+    /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i.test(
+      planId
+    )
+  )
+    return planId;
+  return null;
+}
 
 function parseRoutingHeader(headers?: Headers | null): Record<string, unknown> | null {
   const value = headers?.get("x-quattro-routing")?.trim();
@@ -67,10 +115,13 @@ export function extractLockedRoutingRequest(
     return { response: lockedFailureResponse("CAPABILITY_UNSUPPORTED", false) };
   const routing = headerRouting ?? body.routing;
   if (!routing) return { body, locked: null };
-  const passthrough = routing.preference_mode === "passthrough";
+  const passthrough =
+    routing.preference_mode === "passthrough" || routing.preference_mode === "legacy";
   const locked = routing.routingLocked === true || routing.routing_locked === true;
   if (!passthrough && !locked) return { body, locked: null };
   if (!passthrough || !locked)
+    return { response: lockedFailureResponse("CAPABILITY_UNSUPPORTED", false) };
+  if (resolveOmniRouteRoutingMode() !== "passthrough")
     return { response: lockedFailureResponse("CAPABILITY_UNSUPPORTED", false) };
   const raw = routing.target;
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
@@ -85,10 +136,15 @@ export function extractLockedRoutingRequest(
   if (!target.provider || !target.account || !target.model || !target.route)
     return { response: lockedFailureResponse("CAPABILITY_UNSUPPORTED", false) };
   const { routing: _routing, ...providerBody } = body;
+  const planId = requiredString(routing.planId) ?? requiredString(routing.plan_id);
   return {
     body: providerBody,
     locked: {
-      planId: requiredString(routing.planId) ?? requiredString(routing.plan_id),
+      planId,
+      receiptToken: resolveReceiptCapability(
+        planId,
+        routing.receiptToken ?? routing.receipt_token
+      ),
       target: target as LockedRoutingTarget,
     },
   };
@@ -153,7 +209,8 @@ export function classifyLockedFailure(status: number, text: string): LockedTarge
   if (/quota|usage limit|resource_exhausted/.test(value)) return "QUOTA_EXHAUSTED";
   if (status === 429) return "RATE_LIMITED";
   if (/context|token limit|too many tokens|prompt is too long/.test(value)) return "CONTEXT_LIMIT";
-  if (/unsupported|capability|does not support/.test(value)) return "CAPABILITY_UNSUPPORTED";
+  if (/unsupported|capability|does not support|fidelity violation|locked target/.test(value))
+    return "CAPABILITY_UNSUPPORTED";
   if (status === 404 || /model.*(?:unavailable|not found)/.test(value)) return "MODEL_UNAVAILABLE";
   if (/account|credential/.test(value)) return "ACCOUNT_UNAVAILABLE";
   if (/econnreset|socket hang up|early eof|proxy_unreachable|transport/.test(value))
@@ -180,10 +237,12 @@ export function lockedFailureResponse(
   retryable: boolean,
   retryAfter: number | null = null,
   status = 503,
-  actual: LockedExecutionTarget | null = null
+  actual: LockedExecutionTarget | null = null,
+  requested: LockedRoutingTarget | null = null
 ): Response {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (actual) addEvidence(headers, actual);
+  const identity = actual ?? requested;
   return new Response(
     JSON.stringify({
       error: {
@@ -192,6 +251,10 @@ export function lockedFailureResponse(
         retryable,
         retry_after_ms: retryAfter,
         message: "Locked target could not execute",
+        provider: identity?.provider ?? null,
+        account: identity?.account ?? null,
+        model: identity?.model ?? null,
+        route: identity?.route ?? null,
       },
     }),
     { status, headers }
@@ -215,6 +278,30 @@ export async function normalizeLockedFailure(
     actual
   );
 }
+
+export function normalizeLockedException(
+  error: unknown,
+  actual: LockedExecutionTarget | null = null,
+  requested: LockedRoutingTarget | null = null
+): Response {
+  const record = error && typeof error === "object" ? (error as Record<string, unknown>) : {};
+  const statusCandidate = record.status ?? record.statusCode;
+  const status =
+    typeof statusCandidate === "number" && Number.isInteger(statusCandidate)
+      ? statusCandidate
+      : 503;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const type = classifyLockedFailure(status, message);
+  const headers = record.headers instanceof Headers ? record.headers : null;
+  return lockedFailureResponse(
+    type,
+    ["RATE_LIMITED", "TRANSPORT_FAILURE", "PROVIDER_UNAVAILABLE"].includes(type),
+    retryAfterMs(headers?.get("retry-after") ?? null),
+    status >= 400 && status <= 599 ? status : 503,
+    actual,
+    requested
+  );
+}
 export function withLockedTargetEvidence(
   response: Response,
   actual: LockedExecutionTarget
@@ -233,7 +320,7 @@ export async function recordLockedTargetReceipt(
   response: Response,
   actual: LockedExecutionTarget | null
 ): Promise<void> {
-  if (!request.planId) return;
+  if (!request.planId || !request.receiptToken) return;
   let failure: LockedTargetReceipt["failure"] = null;
   if (!response.ok) {
     try {
@@ -249,7 +336,7 @@ export async function recordLockedTargetReceipt(
       }
     } catch {}
   }
-  lockedReceipts.push({
+  const receipt: LockedTargetReceipt = {
     plan_id: request.planId,
     success: response.ok,
     actual_provider: actual?.provider ?? null,
@@ -259,13 +346,24 @@ export async function recordLockedTargetReceipt(
     connection_id: actual?.connectionId ?? null,
     failure,
     received_at: new Date().toISOString(),
-  });
+  };
+  lockedReceiptTokenHashes.set(receipt, receiptTokenHash(request.receiptToken));
+  lockedReceipts.push(receipt);
   if (lockedReceipts.length > 500) lockedReceipts.splice(0, lockedReceipts.length - 500);
 }
 
-export function getLockedTargetReceipt(planId: string): LockedTargetReceipt | null {
+export function getLockedTargetReceipt(
+  planId: string,
+  receiptToken: string
+): LockedTargetReceipt | null {
+  const candidateHash = receiptTokenHash(receiptToken);
   for (let index = lockedReceipts.length - 1; index >= 0; index -= 1) {
-    if (lockedReceipts[index]?.plan_id === planId) return { ...lockedReceipts[index]! };
+    const receipt = lockedReceipts[index];
+    if (
+      receipt?.plan_id === planId &&
+      lockedReceiptTokenHashes.get(receipt) === candidateHash
+    )
+      return { ...receipt };
   }
   return null;
 }

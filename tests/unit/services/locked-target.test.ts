@@ -6,8 +6,10 @@ import {
   connectionMatchesLockedAccount,
   extractLockedRoutingRequest,
   normalizeLockedFailure,
+  normalizeLockedException,
   getLockedTargetReceipt,
   recordLockedTargetReceipt,
+  resolveOmniRouteRoutingMode,
   resolveConnectionAccountIdentity,
   withLockedTargetEvidence,
 } from "../../../open-sse/services/lockedTarget.ts";
@@ -15,7 +17,7 @@ import {
 const routing = {
   preference_mode: "passthrough",
   routingLocked: true,
-  planId: "plan-1",
+  planId: "task_123e4567-e89b-42d3-a456-426614174000.plan-0",
   target: {
     provider: "codex",
     account: "account-1",
@@ -58,11 +60,36 @@ test("rejects half-locked routing contracts", () => {
   assert.equal(result.response.status, 503);
 });
 
+test("gateway defaults to passthrough and keeps legacy behind an explicit mode", () => {
+  assert.equal(resolveOmniRouteRoutingMode(undefined), "passthrough");
+  assert.equal(resolveOmniRouteRoutingMode("LEGACY"), "legacy");
+  assert.equal(resolveOmniRouteRoutingMode("balanced"), null);
+});
+
+test("legacy gateway mode rejects a locked request instead of silently rerouting", () => {
+  const previous = process.env.OMNIROUTE_ROUTING_MODE;
+  process.env.OMNIROUTE_ROUTING_MODE = "legacy";
+  try {
+    const result = extractLockedRoutingRequest({ model: routing.target.route, routing });
+    assert.ok("response" in result);
+    if ("response" in result) assert.equal(result.response.status, 503);
+  } finally {
+    if (previous === undefined) delete process.env.OMNIROUTE_ROUTING_MODE;
+    else process.env.OMNIROUTE_ROUTING_MODE = previous;
+  }
+});
+
 test("account identity is independently derived from connection", () => {
   const connection = { id: "conn-1", name: "account-1", provider: "codex" };
   assert.equal(resolveConnectionAccountIdentity(connection), "account-1");
   assert.equal(connectionMatchesLockedAccount(connection, "account-1"), true);
   assert.equal(connectionMatchesLockedAccount(connection, "account-2"), false);
+});
+
+test("connection account evidence cannot be inferred from the requested route", () => {
+  const connection = { id: "conn-2", name: "account-2", provider: "codex" };
+  assert.equal(resolveConnectionAccountIdentity(connection), "account-2");
+  assert.equal(connectionMatchesLockedAccount(connection, "account-1"), false);
 });
 
 test("normalizes quota failure and retry-after without changing target", async () => {
@@ -96,12 +123,26 @@ test("failure taxonomy covers transport, auth, capability and context", () => {
   assert.equal(classifyLockedFailure(502, "socket hang up"), "TRANSPORT_FAILURE");
 });
 
+test("normalizes thrown locked dispatch failures with evidence", async () => {
+  const actual = { ...routing.target, account: "account-1", connectionId: "conn-1" };
+  const response = normalizeLockedException(
+    Object.assign(new Error("socket hang up"), { status: 502 }),
+    actual
+  );
+  const payload = await response.json();
+  assert.equal(payload.error.type, "TRANSPORT_FAILURE");
+  assert.equal(payload.error.retryable, true);
+  assert.equal(response.headers.get("X-OmniRoute-Selected-Connection-Id"), "conn-1");
+});
+
 test("records a sanitized plan-scoped receipt for delegated execution", async () => {
-  const request = { planId: "plan-receipt", target: routing.target };
+  const planId = "task_123e4567-e89b-42d3-a456-426614174001.plan-0";
+  const request = { planId, receiptToken: planId, target: routing.target };
   const actual = { ...routing.target, connectionId: "conn-receipt" };
   await recordLockedTargetReceipt(request, new Response("ok"), actual);
-  assert.deepEqual(getLockedTargetReceipt("plan-receipt"), {
-    plan_id: "plan-receipt",
+  assert.equal(getLockedTargetReceipt(planId, "wrong-token"), null);
+  assert.deepEqual(getLockedTargetReceipt(planId, planId), {
+    plan_id: planId,
     success: true,
     actual_provider: "codex",
     actual_account: "account-1",
@@ -109,6 +150,6 @@ test("records a sanitized plan-scoped receipt for delegated execution", async ()
     actual_route: "account-1/gpt-5.6-luna",
     connection_id: "conn-receipt",
     failure: null,
-    received_at: getLockedTargetReceipt("plan-receipt")?.received_at,
+    received_at: getLockedTargetReceipt(planId, planId)?.received_at,
   });
 });
