@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { resetDbInstance } from "../../../src/lib/db/core.ts";
+
 import {
   classifyLockedFailure,
   connectionMatchesLockedAccount,
@@ -8,6 +10,7 @@ import {
   normalizeLockedFailure,
   normalizeLockedException,
   getLockedTargetReceipt,
+  getLockedRoutingCapabilities,
   recordLockedTargetReceipt,
   resolveOmniRouteRoutingMode,
   resolveConnectionAccountIdentity,
@@ -27,9 +30,14 @@ const routing = {
 };
 
 test("extracts complete locked request and strips gateway metadata", () => {
-  const result = extractLockedRoutingRequest({ model: routing.target.route, routing });
+  const result = extractLockedRoutingRequest({
+    model: routing.target.route,
+    routing: { ...routing, session_id: "session-1", turn_id: "turn-1" },
+  });
   assert.ok("locked" in result);
   assert.equal(result.locked?.target.account, "account-1");
+  assert.equal(result.locked?.sessionId, "session-1");
+  assert.equal(result.locked?.turnId, "turn-1");
   assert.equal(result.body.routing, undefined);
 });
 
@@ -79,6 +87,31 @@ test("legacy gateway mode rejects a locked request instead of silently rerouting
   }
 });
 
+test("legacy preference cannot enter the locked passthrough path", () => {
+  const result = extractLockedRoutingRequest({
+    model: routing.target.route,
+    routing: { ...routing, preference_mode: "legacy" },
+  });
+  assert.ok("response" in result);
+  if ("response" in result) assert.equal(result.response.status, 503);
+});
+
+test("reports the runtime locked-routing contract", () => {
+  const previous = process.env.OMNIROUTE_ROUTING_MODE;
+  process.env.OMNIROUTE_ROUTING_MODE = "passthrough";
+  try {
+    assert.deepEqual(getLockedRoutingCapabilities(), {
+      routing_mode: "passthrough",
+      locked_target_supported: true,
+      receipt_supported: true,
+      target_rerouting: false,
+    });
+  } finally {
+    if (previous === undefined) delete process.env.OMNIROUTE_ROUTING_MODE;
+    else process.env.OMNIROUTE_ROUTING_MODE = previous;
+  }
+});
+
 test("account identity is independently derived from connection", () => {
   const connection = { id: "conn-1", name: "account-1", provider: "codex" };
   assert.equal(resolveConnectionAccountIdentity(connection), "account-1");
@@ -90,6 +123,15 @@ test("connection account evidence cannot be inferred from the requested route", 
   const connection = { id: "conn-2", name: "account-2", provider: "codex" };
   assert.equal(resolveConnectionAccountIdentity(connection), "account-2");
   assert.equal(connectionMatchesLockedAccount(connection, "account-1"), false);
+});
+
+test("account matching accepts provider-native identity when the display name differs", () => {
+  const connection = {
+    id: "conn-native",
+    name: "Personal Codex",
+    providerSpecificData: { accountId: "account-1" },
+  };
+  assert.equal(connectionMatchesLockedAccount(connection, "account-1"), true);
 });
 
 test("normalizes quota failure and retry-after without changing target", async () => {
@@ -137,19 +179,51 @@ test("normalizes thrown locked dispatch failures with evidence", async () => {
 
 test("records a sanitized plan-scoped receipt for delegated execution", async () => {
   const planId = "task_123e4567-e89b-42d3-a456-426614174001.plan-0";
-  const request = { planId, receiptToken: planId, target: routing.target };
+  const request = {
+    planId,
+    receiptToken: planId,
+    sessionId: "session-1",
+    turnId: "turn-2",
+    target: routing.target,
+  };
   const actual = { ...routing.target, connectionId: "conn-receipt" };
-  await recordLockedTargetReceipt(request, new Response("ok"), actual);
+  await recordLockedTargetReceipt(
+    request,
+    Response.json({
+      usage: {
+        input_tokens: 120,
+        input_tokens_details: { cached_tokens: 80 },
+        output_tokens: 20,
+      },
+    }),
+    actual
+  );
   assert.equal(getLockedTargetReceipt(planId, "wrong-token"), null);
+  const receivedAt = getLockedTargetReceipt(planId, planId)?.received_at;
   assert.deepEqual(getLockedTargetReceipt(planId, planId), {
     plan_id: planId,
+    session_id: "session-1",
+    turn_id: "turn-2",
     success: true,
+    selected_target: routing.target,
+    routing_mode: "passthrough",
+    targetHonored: true,
     actual_provider: "codex",
     actual_account: "account-1",
     actual_model: "gpt-5.6-luna",
     actual_route: "account-1/gpt-5.6-luna",
     connection_id: "conn-receipt",
     failure: null,
-    received_at: getLockedTargetReceipt(planId, planId)?.received_at,
+    usage: {
+      input_tokens: 120,
+      cached_input_tokens: 80,
+      uncached_input_tokens: 40,
+      output_tokens: 20,
+      cache_metric_provenance: "provider_response",
+    },
+    received_at: receivedAt,
   });
+
+  resetDbInstance();
+  assert.equal(getLockedTargetReceipt(planId, planId)?.received_at, receivedAt);
 });

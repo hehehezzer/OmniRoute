@@ -136,11 +136,11 @@ import { getComboFailureLogError } from "./comboFailureLogging";
 import { getProviderConnectionById } from "@/lib/db/providers";
 import {
   extractLockedRoutingRequest,
+  connectionMatchesLockedAccount,
   normalizeLockedException,
   lockedFailureResponse,
   normalizeLockedFailure,
   recordLockedTargetReceipt,
-  resolveConnectionAccountIdentity,
   resolveLockedComboTarget,
   withLockedTargetEvidence,
   type LockedExecutionTarget,
@@ -770,17 +770,16 @@ async function handleChatImplementation(
         return failLocked("ACCOUNT_UNAVAILABLE");
       }
       const actualProvider = String(connection.provider ?? "");
-      const actualAccount = resolveConnectionAccountIdentity(connection);
       if (
         actualProvider !== lockedRoutingRequest.target.provider ||
-        actualAccount !== lockedRoutingRequest.target.account
+        !connectionMatchesLockedAccount(connection, lockedRoutingRequest.target.account)
       ) {
         return failLocked("ACCOUNT_UNAVAILABLE");
       }
       const resolvedModel = parseModel(resolvedTarget.modelStr);
       actual = {
         provider: actualProvider,
-        account: actualAccount,
+        account: lockedRoutingRequest.target.account,
         model: resolvedModel.model || resolvedTarget.modelStr,
         route: String(lockedCombo.name),
         connectionId: resolvedTarget.connectionId,
