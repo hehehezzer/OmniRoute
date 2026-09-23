@@ -13,8 +13,8 @@ type BypassClass = "A" | "B" | "C";
 
 const EXPECTED: Record<InventoryKind, Record<string, number>> = {
   credential: {
-    // Locked-target fidelity re-reads the already selected credentials inside
-    // chatCore and remains behind the managed-lease fence (class A).
+    // FLUSH_EMPTY_RETRY resolves fresh credentials without a connection allowlist
+    // and replaces the active credentials before replaying the request (class B).
     "open-sse/handlers/chatCore.ts": 1,
     // v3.8.51 #12867 (d6f315018): the two credential-resolution sites that used to
     // live in chatCore.ts (codex 429 and antigravity 422 account rotation) were
@@ -227,7 +227,6 @@ const CLASSIFICATION: Record<InventoryKind, Record<string, BypassClass>> = {
     Object.keys(EXPECTED.credential).map((file) => [
       file,
       file === "src/app/api/v1/session-leases/route.ts" ||
-      file === "open-sse/handlers/chatCore.ts" ||
       file === "src/sse/handlers/chat.ts" ||
       file === "src/sse/services/auth.ts"
         ? "A"
@@ -363,7 +362,7 @@ test("locked-target account lookup preserves the managed lease and exact connect
     "if (lockedRoutingRequest) {",
     chat.indexOf("const apiKeyInfo = policy.apiKeyInfo")
   );
-  const end = chat.indexOf("// OmniRoute-native", start);
+  const end = chat.indexOf("// T05 — Task-Aware Smart Routing", start);
   assert.ok(start >= 0 && end > start);
   const lockedDispatch = chat.slice(start, end);
   assert.equal(CLASSIFICATION.connection["src/sse/handlers/chat.ts"], "A");
@@ -422,12 +421,12 @@ test("managed request surfaces are fenced centrally or rejected before independe
     "utf8"
   );
   const rotationPolicySites = core.match(
-    /allowAccountRotation: !managedLease && comboStrategy !== "context-relay"/g
+    /allowAccountRotation:\s*!lockedTarget && !managedLease && comboStrategy !== "context-relay"/g
   );
   assert.equal(
     rotationPolicySites?.length,
     2,
-    "both the streaming and the non-streaming leg must derive account rotation from !managedLease"
+    "both legs must disable account rotation for locked targets and managed leases"
   );
   assert.match(pipeline, /const canRotateAccount = policy\.allowAccountRotation && !isolateProbe;/);
   assert.match(pipeline, /canRotateAccount &&\s*target\.provider === "codex"/);

@@ -4104,8 +4104,9 @@ export async function handleChatCore({
     try {
       const pipelineOutcome = await runProviderExecutionPipeline({
         policy: {
-          allowAccountRotation: !managedLease && comboStrategy !== "context-relay",
-          allowModelFallback: true,
+          allowAccountRotation:
+            !lockedTarget && !managedLease && comboStrategy !== "context-relay",
+          allowModelFallback: !lockedTarget,
           expectedConnectionId: managedLease
             ? String(getCurrentConnectionId() || connectionId || "") || undefined
             : undefined,
@@ -5090,8 +5091,9 @@ export async function handleChatCore({
         expectedConnectionId: managedLease
           ? String(getCurrentConnectionId() || connectionId || "") || undefined
           : undefined,
-        allowAccountRotation: !managedLease && comboStrategy !== "context-relay",
-        allowModelFallback: true,
+        allowAccountRotation:
+          !lockedTarget && !managedLease && comboStrategy !== "context-relay",
+        allowModelFallback: !lockedTarget,
         executeProviderRequest: (modelToCall, allowDedup) =>
           executeProviderRequest(modelToCall, allowDedup),
         runProviderExecution: runNonStreamingPipeline,
@@ -5864,7 +5866,7 @@ export async function handleChatCore({
   // Known TTFT cost when armed: a small valid turn under the cap is fully
   // buffered before the first client byte (flag off by default, so the
   // streaming path is untouched unless opted in).
-  if (stream && providerResponse.ok && providerResponse.body) {
+  if (!lockedTarget && stream && providerResponse.ok && providerResponse.body) {
     let flushEmptyRetryArmed = false;
     try {
       flushEmptyRetryArmed = isFeatureFlagEnabled("FLUSH_EMPTY_RETRY_ENABLED");

@@ -733,97 +733,6 @@ async function handleChatImplementation(
   const bypassProviderQuotaPolicy = hasProviderQuotaBypassScope(apiKeyInfo?.scopes);
   telemetry.endPhase();
 
-  // Quattro-authoritative requests bypass every target-changing router. The route
-  // must be a single account-pinned combo whose DB connection agrees with the lock.
-  if (lockedRoutingRequest) {
-    // Locked routing bypasses selection, not local safety. Keep the pressure
-    // fuse ahead of all connection/provider work and preserve the original
-    // structured gateway-pressure response so Quattro can retry this exact
-    // plan without treating the selected target as unhealthy.
-    const pressureGuard = checkResourcePressureBeforeProviderWork();
-    if (pressureGuard) {
-      const response = await normalizeLockedFailure(pressureGuard.response, null);
-      await recordLockedTargetReceipt(lockedRoutingRequest, response, null);
-      return response;
-    }
-    let actual: LockedExecutionTarget | null = null;
-    const failLocked = async (
-      type: Parameters<typeof lockedFailureResponse>[0],
-      retryable = false
-    ) => {
-      const response = lockedFailureResponse(
-        type,
-        retryable,
-        null,
-        503,
-        actual,
-        lockedRoutingRequest!.target
-      );
-      await recordLockedTargetReceipt(lockedRoutingRequest!, response, null);
-      return response;
-    };
-    try {
-      const lockedCombo = await getComboByName(lockedRoutingRequest.target.route);
-      const allCombos = await getCombos();
-      if (!lockedCombo) return failLocked("MODEL_UNAVAILABLE");
-      const resolvedTarget = resolveLockedComboTarget(
-        lockedCombo as ComboLike,
-        allCombos,
-        lockedRoutingRequest
-      );
-      if (!resolvedTarget?.connectionId) return failLocked("CAPABILITY_UNSUPPORTED");
-      const connection = (await getProviderConnectionById(resolvedTarget.connectionId)) as Record<
-        string,
-        unknown
-      > | null;
-      if (!connection || connection.isActive === false) {
-        return failLocked("ACCOUNT_UNAVAILABLE");
-      }
-      const actualProvider = String(connection.provider ?? "");
-      if (
-        actualProvider !== lockedRoutingRequest.target.provider ||
-        !connectionMatchesLockedAccount(connection, lockedRoutingRequest.target.account)
-      ) {
-        return failLocked("ACCOUNT_UNAVAILABLE");
-      }
-      const resolvedModel = parseModel(resolvedTarget.modelStr);
-      actual = {
-        provider: actualProvider,
-        account: lockedRoutingRequest.target.account,
-        model: resolvedModel.model || resolvedTarget.modelStr,
-        route: String(lockedCombo.name),
-        connectionId: resolvedTarget.connectionId,
-      };
-      const lockedResponse = await handleSingleModelChat(
-        { ...body, model: `${actual.provider}/${actual.model}` },
-        `${actual.provider}/${actual.model}`,
-        clientRawRequest,
-        request,
-        null,
-        apiKeyInfo,
-        telemetry,
-        {
-          sessionId,
-          sessionAffinityKey,
-          forcedConnectionId: actual.connectionId,
-          allowedConnectionIds: [actual.connectionId],
-          correlationId: reqId,
-          conversationId: null,
-          managedLease,
-          lockedTarget: actual,
-        }
-      );
-      const normalized = await normalizeLockedFailure(lockedResponse, actual);
-      const evidenced = withLockedTargetEvidence(normalized, actual);
-      await recordLockedTargetReceipt(lockedRoutingRequest, evidenced, actual);
-      return evidenced;
-    } catch (error) {
-      const failure = normalizeLockedException(error, actual, lockedRoutingRequest!.target);
-      await recordLockedTargetReceipt(lockedRoutingRequest, failure, actual);
-      return failure;
-    }
-  }
-
   // OmniRoute-native `previous_response_id` continuation: reconstruct the
   // full input server-side before ANY downstream validation/translation
   // sees this request, so everything after this point (message-shape
@@ -1025,6 +934,122 @@ async function handleChatImplementation(
   // Short-circuit if a hook returned a direct response
   if (hookResponse) {
     return errorResponse(hookResponse.status, hookResponse.body as any);
+  }
+
+  // Quattro-authoritative requests still pass admission, guardrails, session
+  // accounting, and middleware hooks. Only target selection is bypassed.
+  if (lockedRoutingRequest) {
+    const persistLockedReceipt = async (
+      response: Response,
+      actual: LockedExecutionTarget | null
+    ): Promise<void> => {
+      try {
+        await recordLockedTargetReceipt(lockedRoutingRequest!, response, actual);
+      } catch (error) {
+        log.warn("CHAT", "Locked-target receipt persistence failed", {
+          correlationId: reqId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+    const pressureGuard = checkResourcePressureBeforeProviderWork();
+    if (pressureGuard) {
+      const response = await normalizeLockedFailure(pressureGuard.response, null);
+      await persistLockedReceipt(response, null);
+      return response;
+    }
+    let actual: LockedExecutionTarget | null = null;
+    const failLocked = async (
+      type: Parameters<typeof lockedFailureResponse>[0],
+      retryable = false
+    ) => {
+      const response = lockedFailureResponse(
+        type,
+        retryable,
+        null,
+        503,
+        actual,
+        lockedRoutingRequest!.target
+      );
+      await persistLockedReceipt(response, null);
+      return response;
+    };
+    if (modelStr !== lockedRoutingRequest.target.route) {
+      return failLocked("CAPABILITY_UNSUPPORTED");
+    }
+
+    let response: Response;
+    try {
+      const lockedCombo = await getComboByName(lockedRoutingRequest.target.route);
+      const allCombos = await getCombos();
+      if (!lockedCombo) return failLocked("MODEL_UNAVAILABLE");
+      const resolvedTarget = resolveLockedComboTarget(
+        lockedCombo as ComboLike,
+        allCombos,
+        lockedRoutingRequest
+      );
+      if (!resolvedTarget?.connectionId) return failLocked("CAPABILITY_UNSUPPORTED");
+      const connection = (await getProviderConnectionById(resolvedTarget.connectionId)) as Record<
+        string,
+        unknown
+      > | null;
+      if (!connection || connection.isActive === false) {
+        return failLocked("ACCOUNT_UNAVAILABLE");
+      }
+      const actualProvider = String(connection.provider ?? "");
+      if (
+        actualProvider !== lockedRoutingRequest.target.provider ||
+        !connectionMatchesLockedAccount(connection, lockedRoutingRequest.target.account)
+      ) {
+        return failLocked("ACCOUNT_UNAVAILABLE");
+      }
+      const resolvedModel = parseModel(resolvedTarget.modelStr);
+      actual = {
+        provider: actualProvider,
+        account: lockedRoutingRequest.target.account,
+        model: resolvedModel.model || resolvedTarget.modelStr,
+        route: String(lockedCombo.name),
+        connectionId: resolvedTarget.connectionId,
+      };
+      if (
+        !(await comboTargetPassesKeyModelPolicy({
+          apiKey,
+          apiKeyInfo,
+          requestedModelStr: lockedRoutingRequest.target.route,
+          targetModelStr: `${actual.provider}/${actual.model}`,
+          isModelAllowedForKey,
+        }))
+      ) {
+        return failLocked("CAPABILITY_UNSUPPORTED");
+      }
+      const lockedResponse = await handleSingleModelChat(
+        { ...body, model: `${actual.provider}/${actual.model}` },
+        `${actual.provider}/${actual.model}`,
+        clientRawRequest,
+        request,
+        null,
+        apiKeyInfo,
+        telemetry,
+        {
+          sessionId,
+          sessionAffinityKey,
+          forcedConnectionId: actual.connectionId,
+          allowedConnectionIds: [actual.connectionId],
+          correlationId: reqId,
+          conversationId,
+          managedLease,
+          lockedTarget: actual,
+        }
+      );
+      response = withLockedTargetEvidence(
+        await normalizeLockedFailure(lockedResponse, actual),
+        actual
+      );
+    } catch (error) {
+      response = normalizeLockedException(error, actual, lockedRoutingRequest.target);
+    }
+    await persistLockedReceipt(response, actual);
+    return response;
   }
 
   // T05 — Task-Aware Smart Routing

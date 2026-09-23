@@ -42,7 +42,7 @@ test("locked passthrough keeps the local pressure fuse before provider dispatch"
   );
   assert.match(
     source.slice(pressure, dispatch),
-    /recordLockedTargetReceipt\(lockedRoutingRequest, response, null\)/
+    /persistLockedReceipt\(response, null\)/
   );
 });
 
@@ -66,6 +66,19 @@ test("extracts locked request from delegated X-Quattro-Routing transport", () =>
   );
   assert.ok("locked" in result);
   assert.equal(result.locked?.target.route, routing.target.route);
+});
+
+test("rejects conflicting header and body locks instead of selecting one", () => {
+  const conflicting = {
+    ...routing,
+    target: { ...routing.target, account: "account-2", route: "account-2/gpt-5.6-luna" },
+  };
+  const result = extractLockedRoutingRequest(
+    { model: routing.target.route, routing: conflicting },
+    new Headers({ "X-Quattro-Routing": JSON.stringify(routing) })
+  );
+  assert.ok("response" in result);
+  assert.equal(result.response.status, 503);
 });
 
 test("rejects malformed delegated routing headers instead of bypassing the lock", () => {
@@ -177,8 +190,10 @@ test("actual evidence comes only from resolved execution target", () => {
 
 test("failure taxonomy covers transport, auth, capability and context", () => {
   assert.equal(classifyLockedFailure(401, "bad token"), "AUTHENTICATION_FAILED");
+  assert.equal(classifyLockedFailure(403, "forbidden"), "AUTHENTICATION_FAILED");
   assert.equal(classifyLockedFailure(400, "capability unsupported"), "CAPABILITY_UNSUPPORTED");
   assert.equal(classifyLockedFailure(400, "context length exceeded"), "CONTEXT_LIMIT");
+  assert.equal(classifyLockedFailure(422, "invalid request shape"), "CLIENT_ERROR");
   assert.equal(classifyLockedFailure(502, "socket hang up"), "TRANSPORT_FAILURE");
   assert.equal(
     classifyLockedFailure(503, '{"error":{"code":"resource_pressure"}}'),

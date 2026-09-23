@@ -14,6 +14,7 @@ export const LOCKED_TARGET_FAILURES = [
   "AUTHENTICATION_FAILED",
   "CONTEXT_LIMIT",
   "CAPABILITY_UNSUPPORTED",
+  "CLIENT_ERROR",
   "GATEWAY_RESOURCE_PRESSURE",
   "TRANSPORT_FAILURE",
 ] as const;
@@ -129,13 +130,33 @@ export function extractLockedRoutingRequest(
 ): { body: RoutingBody; locked: LockedRoutingRequest | null } | { response: Response } {
   const rawHeader = headers?.get("x-quattro-routing")?.trim();
   const headerRouting = parseRoutingHeader(headers);
+  const bodyRouting =
+    body.routing && typeof body.routing === "object" && !Array.isArray(body.routing)
+      ? body.routing
+      : null;
+  const { routing: _routing, ...providerBody } = body;
   if (rawHeader && !headerRouting)
     return { response: lockedFailureResponse("CAPABILITY_UNSUPPORTED", false) };
-  const routing = headerRouting ?? body.routing;
-  if (!routing) return { body, locked: null };
+  const indicatesLock = (value: Record<string, unknown> | null): boolean =>
+    Boolean(
+      value &&
+        (value.preference_mode === "passthrough" ||
+          value.routingLocked === true ||
+          value.routing_locked === true)
+    );
+  if (
+    headerRouting &&
+    bodyRouting &&
+    (indicatesLock(headerRouting) || indicatesLock(bodyRouting)) &&
+    JSON.stringify(headerRouting) !== JSON.stringify(bodyRouting)
+  ) {
+    return { response: lockedFailureResponse("CAPABILITY_UNSUPPORTED", false) };
+  }
+  const routing = headerRouting ?? bodyRouting;
+  if (!routing) return { body: providerBody, locked: null };
   const passthrough = routing.preference_mode === "passthrough";
   const locked = routing.routingLocked === true || routing.routing_locked === true;
-  if (!passthrough && !locked) return { body, locked: null };
+  if (!passthrough && !locked) return { body: providerBody, locked: null };
   if (!passthrough || !locked)
     return { response: lockedFailureResponse("CAPABILITY_UNSUPPORTED", false) };
   if (resolveOmniRouteRoutingMode() !== "passthrough")
@@ -152,7 +173,6 @@ export function extractLockedRoutingRequest(
   };
   if (!target.provider || !target.account || !target.model || !target.route)
     return { response: lockedFailureResponse("CAPABILITY_UNSUPPORTED", false) };
-  const { routing: _routing, ...providerBody } = body;
   const planId = requiredString(routing.planId) ?? requiredString(routing.plan_id);
   return {
     body: providerBody,
@@ -221,7 +241,13 @@ export function classifyLockedFailure(status: number, text: string): LockedTarge
   const value = text.toLowerCase();
   if (/resource_pressure|gateway_resource_pressure|resource pressure/.test(value))
     return "GATEWAY_RESOURCE_PRESSURE";
-  if (status === 401 || /authentication failed|invalid.*(?:token|credential)/.test(value))
+  if (
+    status === 401 ||
+    status === 403 ||
+    /authentication failed|invalid (?:api )?(?:key|token|credential)|expired (?:api )?(?:key|token|credential)|missing (?:api )?(?:key|token|credential)/.test(
+      value
+    )
+  )
     return "AUTHENTICATION_FAILED";
   if (/credit|billing|insufficient balance/.test(value)) return "CREDITS_EXHAUSTED";
   if (/quota|usage limit|resource_exhausted/.test(value)) return "QUOTA_EXHAUSTED";
@@ -230,10 +256,12 @@ export function classifyLockedFailure(status: number, text: string): LockedTarge
   if (/unsupported|capability|does not support|fidelity violation|locked target/.test(value))
     return "CAPABILITY_UNSUPPORTED";
   if (status === 404 || /model.*(?:unavailable|not found)/.test(value)) return "MODEL_UNAVAILABLE";
-  if (/account|credential/.test(value)) return "ACCOUNT_UNAVAILABLE";
+  if (/account unavailable|account disabled|no active (?:account|credential)/.test(value))
+    return "ACCOUNT_UNAVAILABLE";
   if (/econnreset|socket hang up|early eof|proxy_unreachable|transport/.test(value))
     return "TRANSPORT_FAILURE";
   if (status >= 500) return "PROVIDER_UNAVAILABLE";
+  if (status >= 400) return "CLIENT_ERROR";
   return "TRANSPORT_FAILURE";
 }
 const retryAfterMs = (value: string | null): number | null => {
