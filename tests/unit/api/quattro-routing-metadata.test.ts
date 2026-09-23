@@ -41,6 +41,7 @@ test("capability negotiation advertises the additive contract", async () => {
   assert.equal(body.capabilities.candidate_snapshot, true);
   assert.equal(body.capabilities.routing_requirements, true);
   assert.equal(body.capabilities.preferred_candidates, true);
+  assert.equal(body.capabilities.routing_header_transport, true);
   assert.equal(response.headers.get("cache-control"), "no-store");
 });
 
