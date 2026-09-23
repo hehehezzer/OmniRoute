@@ -457,6 +457,7 @@ export async function executeChatWithBreaker({
   reasoningTransportFallback = "drop",
   sessionAffinityKey = null,
   managedLease = null,
+  lockedTarget = null,
   // #12150 P1b: additive, optional video-bridge log/Memory shadow — undefined
   // for every non-video request. Passed straight through to handleChatCore;
   // see its own destructure default for the shape and consumers.
@@ -522,6 +523,7 @@ export async function executeChatWithBreaker({
             sessionAffinityKey,
             reasoningTransportFallback,
             managedLease,
+            lockedTarget,
             videoBridgeLog,
             fallbackAttempts,
             skipResourcePressureGuard: true,

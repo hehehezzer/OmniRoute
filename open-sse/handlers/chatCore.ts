@@ -497,6 +497,7 @@ export async function handleChatCore({
   skipResourcePressureGuard = false,
   reasoningTransportFallback = "drop",
   managedLease = null,
+  lockedTarget = null,
   // #12150 P1b: additive, optional video-bridge log/Memory shadow — shape is
   // VideoBridgeLogParam (defined near the top of this file). Built once in chat.ts from
   // preCallGuardrails.results (video-bridge guardrail meta) and threaded here
@@ -3119,7 +3120,13 @@ export async function handleChatCore({
         const rawResult: ChatCoreExecutorResult = await (async () => {
           let attempts = 0;
           const isModelScopeForRequest = isModelScope();
-          const maxAttempts = isModelScopeForRequest ? 3 : provider === "codex" ? 3 : 1;
+          const maxAttempts = lockedTarget
+            ? 1
+            : isModelScopeForRequest
+              ? 3
+              : provider === "codex"
+                ? 3
+                : 1;
 
           while (attempts < maxAttempts) {
             trace("pre_executor", { attempt: attempts });
@@ -3129,6 +3136,17 @@ export async function handleChatCore({
             const execCreds = getExecutionCredentials();
             const executionConnectionId = getExecutionConnectionId(execCreds);
             const attemptConnectionId = executionConnectionId || connectionId;
+            if (
+              lockedTarget &&
+              (provider !== lockedTarget.provider ||
+                modelToCall !== lockedTarget.model ||
+                attemptConnectionId !== lockedTarget.connectionId)
+            ) {
+              throw Object.assign(new Error("Locked target fidelity violation"), {
+                code: "LOCKED_TARGET_MISMATCH",
+                status: 409,
+              });
+            }
             const accountSemaphoreMaxConcurrency = resolveAccountSemaphoreMaxConcurrency(execCreds);
             const accountSemaphoreKey = resolveAccountSemaphoreKey({
               provider,
@@ -4086,8 +4104,9 @@ export async function handleChatCore({
     try {
       const pipelineOutcome = await runProviderExecutionPipeline({
         policy: {
-          allowAccountRotation: !managedLease && comboStrategy !== "context-relay",
-          allowModelFallback: true,
+          allowAccountRotation:
+            !lockedTarget && !managedLease && comboStrategy !== "context-relay",
+          allowModelFallback: !lockedTarget,
           expectedConnectionId: managedLease
             ? String(getCurrentConnectionId() || connectionId || "") || undefined
             : undefined,
@@ -4748,7 +4767,7 @@ export async function handleChatCore({
       // Before returning a model-unavailable error upstream, try sibling models
       // from the same family. This keeps the request alive on the same account
       // instead of failing the entire combo.
-      if (!pipelineRecovered && isModelUnavailableError(statusCode, message, provider)) {
+      if (!lockedTarget && !pipelineRecovered && isModelUnavailableError(statusCode, message, provider)) {
         const nextModel = getNextFamilyFallback(currentModel, triedModels, provider);
         if (nextModel) {
           triedModels.add(nextModel);
@@ -4837,7 +4856,7 @@ export async function handleChatCore({
             { passthrough: sourceFormat === FORMATS.CLAUDE }
           );
         }
-      } else if (isContextOverflowError(statusCode, message)) {
+      } else if (!lockedTarget && isContextOverflowError(statusCode, message)) {
         const familyCandidates = getModelFamily(currentModel, provider).filter(
           (m) => m !== currentModel && !triedModels.has(m)
         );
@@ -5072,8 +5091,9 @@ export async function handleChatCore({
         expectedConnectionId: managedLease
           ? String(getCurrentConnectionId() || connectionId || "") || undefined
           : undefined,
-        allowAccountRotation: !managedLease && comboStrategy !== "context-relay",
-        allowModelFallback: true,
+        allowAccountRotation:
+          !lockedTarget && !managedLease && comboStrategy !== "context-relay",
+        allowModelFallback: !lockedTarget,
         executeProviderRequest: (modelToCall, allowDedup) =>
           executeProviderRequest(modelToCall, allowDedup),
         runProviderExecution: runNonStreamingPipeline,
@@ -5846,7 +5866,7 @@ export async function handleChatCore({
   // Known TTFT cost when armed: a small valid turn under the cap is fully
   // buffered before the first client byte (flag off by default, so the
   // streaming path is untouched unless opted in).
-  if (stream && providerResponse.ok && providerResponse.body) {
+  if (!lockedTarget && stream && providerResponse.ok && providerResponse.body) {
     let flushEmptyRetryArmed = false;
     try {
       flushEmptyRetryArmed = isFeatureFlagEnabled("FLUSH_EMPTY_RETRY_ENABLED");
