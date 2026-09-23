@@ -123,11 +123,11 @@ import { getComboFailureLogError } from "./comboFailureLogging";
 import { getProviderConnectionById } from "@/lib/db/providers";
 import {
   extractLockedRoutingRequest,
+  connectionMatchesLockedAccount,
   normalizeLockedException,
   lockedFailureResponse,
   normalizeLockedFailure,
   recordLockedTargetReceipt,
-  resolveConnectionAccountIdentity,
   resolveLockedComboTarget,
   withLockedTargetEvidence,
   type LockedExecutionTarget,
@@ -681,50 +681,45 @@ async function handleChatImplementation(
         return failLocked("ACCOUNT_UNAVAILABLE");
       }
       const actualProvider = String(connection.provider ?? "");
-      const actualAccount = resolveConnectionAccountIdentity(connection);
       if (
         actualProvider !== lockedRoutingRequest.target.provider ||
-        actualAccount !== lockedRoutingRequest.target.account
+        !connectionMatchesLockedAccount(connection, lockedRoutingRequest.target.account)
       ) {
         return failLocked("ACCOUNT_UNAVAILABLE");
       }
       const resolvedModel = parseModel(resolvedTarget.modelStr);
       actual = {
         provider: actualProvider,
-        account: actualAccount,
+        account: lockedRoutingRequest.target.account,
         model: resolvedModel.model || resolvedTarget.modelStr,
         route: String(lockedCombo.name),
         connectionId: resolvedTarget.connectionId,
       };
       const lockedResponse = await handleSingleModelChat(
-      { ...body, model: `${actual.provider}/${actual.model}` },
-      `${actual.provider}/${actual.model}`,
-      clientRawRequest,
-      request,
-      null,
-      apiKeyInfo,
-      telemetry,
-      {
-        sessionId,
-        sessionAffinityKey,
-        forcedConnectionId: actual.connectionId,
-        allowedConnectionIds: [actual.connectionId],
-        correlationId: reqId,
-        conversationId: null,
-        managedLease,
-        lockedTarget: actual,
-      }
+        { ...body, model: `${actual.provider}/${actual.model}` },
+        `${actual.provider}/${actual.model}`,
+        clientRawRequest,
+        request,
+        null,
+        apiKeyInfo,
+        telemetry,
+        {
+          sessionId,
+          sessionAffinityKey,
+          forcedConnectionId: actual.connectionId,
+          allowedConnectionIds: [actual.connectionId],
+          correlationId: reqId,
+          conversationId: null,
+          managedLease,
+          lockedTarget: actual,
+        }
       );
       const normalized = await normalizeLockedFailure(lockedResponse, actual);
       const evidenced = withLockedTargetEvidence(normalized, actual);
       await recordLockedTargetReceipt(lockedRoutingRequest, evidenced, actual);
       return evidenced;
     } catch (error) {
-      const failure = normalizeLockedException(
-        error,
-        actual,
-        lockedRoutingRequest!.target
-      );
+      const failure = normalizeLockedException(error, actual, lockedRoutingRequest!.target);
       await recordLockedTargetReceipt(lockedRoutingRequest, failure, actual);
       return failure;
     }
