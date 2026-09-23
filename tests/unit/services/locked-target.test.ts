@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs";
 
 import { resetDbInstance } from "../../../src/lib/db/core.ts";
 
@@ -28,6 +29,22 @@ const routing = {
     route: "account-1/gpt-5.6-luna",
   },
 };
+
+test("locked passthrough keeps the local pressure fuse before provider dispatch", () => {
+  const source = fs.readFileSync("src/sse/handlers/chat.ts", "utf8");
+  const locked = source.indexOf("if (lockedRoutingRequest) {");
+  const pressure = source.indexOf("checkResourcePressureBeforeProviderWork()", locked);
+  const dispatch = source.indexOf("handleSingleModelChat(", locked);
+  assert.ok(locked >= 0 && pressure > locked && dispatch > pressure);
+  assert.match(
+    source.slice(pressure, dispatch),
+    /normalizeLockedFailure\(pressureGuard\.response, null\)/
+  );
+  assert.match(
+    source.slice(pressure, dispatch),
+    /recordLockedTargetReceipt\(lockedRoutingRequest, response, null\)/
+  );
+});
 
 test("extracts complete locked request and strips gateway metadata", () => {
   const result = extractLockedRoutingRequest({
@@ -163,6 +180,23 @@ test("failure taxonomy covers transport, auth, capability and context", () => {
   assert.equal(classifyLockedFailure(400, "capability unsupported"), "CAPABILITY_UNSUPPORTED");
   assert.equal(classifyLockedFailure(400, "context length exceeded"), "CONTEXT_LIMIT");
   assert.equal(classifyLockedFailure(502, "socket hang up"), "TRANSPORT_FAILURE");
+  assert.equal(
+    classifyLockedFailure(503, '{"error":{"code":"resource_pressure"}}'),
+    "GATEWAY_RESOURCE_PRESSURE"
+  );
+});
+
+test("normalizes gateway pressure without blaming the locked target", async () => {
+  const response = await normalizeLockedFailure(
+    new Response('{"error":{"code":"resource_pressure"}}', {
+      status: 503,
+      headers: { "Retry-After": "5" },
+    })
+  );
+  const payload = await response.json();
+  assert.equal(payload.error.type, "GATEWAY_RESOURCE_PRESSURE");
+  assert.equal(payload.error.retryable, true);
+  assert.equal(payload.error.retry_after_ms, 5000);
 });
 
 test("normalizes thrown locked dispatch failures with evidence", async () => {

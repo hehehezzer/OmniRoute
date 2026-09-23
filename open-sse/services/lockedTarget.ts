@@ -14,6 +14,7 @@ export const LOCKED_TARGET_FAILURES = [
   "AUTHENTICATION_FAILED",
   "CONTEXT_LIMIT",
   "CAPABILITY_UNSUPPORTED",
+  "GATEWAY_RESOURCE_PRESSURE",
   "TRANSPORT_FAILURE",
 ] as const;
 export type LockedTargetFailure = (typeof LOCKED_TARGET_FAILURES)[number];
@@ -218,6 +219,8 @@ export function connectionMatchesLockedAccount(
 
 export function classifyLockedFailure(status: number, text: string): LockedTargetFailure {
   const value = text.toLowerCase();
+  if (/resource_pressure|gateway_resource_pressure|resource pressure/.test(value))
+    return "GATEWAY_RESOURCE_PRESSURE";
   if (status === 401 || /authentication failed|invalid.*(?:token|credential)/.test(value))
     return "AUTHENTICATION_FAILED";
   if (/credit|billing|insufficient balance/.test(value)) return "CREDITS_EXHAUSTED";
@@ -287,7 +290,12 @@ export async function normalizeLockedFailure(
   const type = classifyLockedFailure(response.status, text);
   return lockedFailureResponse(
     type,
-    ["RATE_LIMITED", "TRANSPORT_FAILURE", "PROVIDER_UNAVAILABLE"].includes(type),
+    [
+      "RATE_LIMITED",
+      "GATEWAY_RESOURCE_PRESSURE",
+      "TRANSPORT_FAILURE",
+      "PROVIDER_UNAVAILABLE",
+    ].includes(type),
     retryAfterMs(response.headers.get("retry-after")),
     response.status,
     actual
@@ -310,7 +318,12 @@ export function normalizeLockedException(
   const headers = record.headers instanceof Headers ? record.headers : null;
   return lockedFailureResponse(
     type,
-    ["RATE_LIMITED", "TRANSPORT_FAILURE", "PROVIDER_UNAVAILABLE"].includes(type),
+    [
+      "RATE_LIMITED",
+      "GATEWAY_RESOURCE_PRESSURE",
+      "TRANSPORT_FAILURE",
+      "PROVIDER_UNAVAILABLE",
+    ].includes(type),
     retryAfterMs(headers?.get("retry-after") ?? null),
     status >= 400 && status <= 599 ? status : 503,
     actual,

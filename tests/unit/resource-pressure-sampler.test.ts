@@ -101,7 +101,7 @@ describe("sampleResourceSignals", () => {
       ["/sys/fs/cgroup/slice/service/memory.high", "966367641\n"],
       ["/sys/fs/cgroup/slice/service/memory.events", "low 1\nhigh 2\nmax 3\noom 4\noom_kill 5\n"],
       [
-        "/proc/pressure/memory",
+        "/sys/fs/cgroup/slice/service/memory.pressure",
         "some avg10=1.50 avg60=2.00 avg300=3.25 total=9\nfull avg10=0.25 avg60=0.50 avg300=0.75 total=1\n",
       ],
     ]);
@@ -132,6 +132,23 @@ describe("sampleResourceSignals", () => {
     });
     assert.equal(signals.psi?.someAvg10, 1.5);
     assert.equal(signals.psi?.fullAvg10, 0.25);
+  });
+
+  it("uses host PSI only when no cgroup memory controller is available", async () => {
+    const fs = mapFs([
+      ["/proc/self/cgroup", "malformed\n"],
+      ["/proc/self/mountinfo", "malformed\n"],
+      [
+        "/proc/pressure/memory",
+        "some avg10=2.50 avg60=2.00 avg300=1.00 total=9\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      ],
+    ]);
+    const signals = await sampleResourceSignals({
+      memoryUsage: () => memoryUsage(),
+      heapStatistics: () => ({ heap_size_limit: GiB, used_heap_size: 1 }),
+      fs,
+    });
+    assert.equal(signals.psi?.someAvg10, 2.5);
   });
 
   it("fails open when platform reads fail or return malformed values", async () => {

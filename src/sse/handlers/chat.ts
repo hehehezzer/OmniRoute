@@ -647,6 +647,16 @@ async function handleChatImplementation(
   // Quattro-authoritative requests bypass every target-changing router. The route
   // must be a single account-pinned combo whose DB connection agrees with the lock.
   if (lockedRoutingRequest) {
+    // Locked routing bypasses selection, not local safety. Keep the pressure
+    // fuse ahead of all connection/provider work and preserve the original
+    // structured gateway-pressure response so Quattro can retry this exact
+    // plan without treating the selected target as unhealthy.
+    const pressureGuard = checkResourcePressureBeforeProviderWork();
+    if (pressureGuard) {
+      const response = await normalizeLockedFailure(pressureGuard.response, null);
+      await recordLockedTargetReceipt(lockedRoutingRequest, response, null);
+      return response;
+    }
     let actual: LockedExecutionTarget | null = null;
     const failLocked = async (
       type: Parameters<typeof lockedFailureResponse>[0],
