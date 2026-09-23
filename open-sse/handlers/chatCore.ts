@@ -523,6 +523,7 @@ export async function handleChatCore({
   skipResourcePressureGuard = false,
   reasoningTransportFallback = "drop",
   managedLease = null,
+  lockedTarget = null,
 }) {
   let { provider, model, extendedContext } = modelInfo;
   if (!skipResourcePressureGuard) {
@@ -3014,7 +3015,13 @@ export async function handleChatCore({
         const rawResult: ChatCoreExecutorResult = await (async () => {
           let attempts = 0;
           const isModelScopeForRequest = isModelScope();
-          const maxAttempts = isModelScopeForRequest ? 3 : provider === "codex" ? 3 : 1;
+          const maxAttempts = lockedTarget
+            ? 1
+            : isModelScopeForRequest
+              ? 3
+              : provider === "codex"
+                ? 3
+                : 1;
 
           // ── Codex 429 account-rotation state ─────────────────────────────────
           // Track excluded connection IDs for codex failover across attempts.
@@ -3044,6 +3051,17 @@ export async function handleChatCore({
             const execCreds = getExecutionCredentials();
             const executionConnectionId = getExecutionConnectionId(execCreds);
             const attemptConnectionId = executionConnectionId || connectionId;
+            if (
+              lockedTarget &&
+              (provider !== lockedTarget.provider ||
+                modelToCall !== lockedTarget.model ||
+                attemptConnectionId !== lockedTarget.connectionId)
+            ) {
+              throw Object.assign(new Error("Locked target fidelity violation"), {
+                code: "LOCKED_TARGET_MISMATCH",
+                status: 409,
+              });
+            }
             const accountSemaphoreMaxConcurrency = resolveAccountSemaphoreMaxConcurrency(execCreds);
             const accountSemaphoreKey = resolveAccountSemaphoreKey({
               provider,
@@ -4435,7 +4453,7 @@ export async function handleChatCore({
     // Before returning a model-unavailable error upstream, try sibling models
     // from the same family. This keeps the request alive on the same account
     // instead of failing the entire combo.
-    if (isModelUnavailableError(statusCode, message, provider)) {
+    if (!lockedTarget && isModelUnavailableError(statusCode, message, provider)) {
       const nextModel = getNextFamilyFallback(currentModel, triedModels, provider);
       if (nextModel) {
         triedModels.add(nextModel);
@@ -4521,7 +4539,7 @@ export async function handleChatCore({
           { passthrough: sourceFormat === FORMATS.CLAUDE }
         );
       }
-    } else if (isContextOverflowError(statusCode, message)) {
+    } else if (!lockedTarget && isContextOverflowError(statusCode, message)) {
       const familyCandidates = getModelFamily(currentModel, provider).filter(
         (m) => m !== currentModel && !triedModels.has(m)
       );

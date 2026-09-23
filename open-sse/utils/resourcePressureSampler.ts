@@ -234,7 +234,12 @@ export async function sampleResourceSignals(
         readText(path.join(cgroupDirectory, "memory.events")),
       ])
     : [null, null, null, null];
-  const psi = await readText("/proc/pressure/memory").catch(() => null);
+  // `/proc/pressure/memory` is host-wide even inside a cgroup-v2 container.
+  // Prefer the cgroup-local PSI signal so unrelated host workloads cannot trip
+  // this process's critical pressure fuse while its own cgroup has headroom.
+  const psi = await readText(
+    cgroupDirectory ? path.join(cgroupDirectory, "memory.pressure") : "/proc/pressure/memory"
+  ).catch(() => null);
 
   return {
     observedAtMs: (deps.nowMs ?? Date.now)(),

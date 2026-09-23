@@ -155,6 +155,9 @@ const EXPECTED: Record<InventoryKind, Record<string, number>> = {
     "src/lib/warmupScheduler.ts": 1,
     "src/shared/services/codexCatalogRevalidation.ts": 2,
     "src/shared/services/modelSyncScheduler.ts": 1,
+    // Locked-target lookup validates the pinned account before dispatch. Credentials
+    // still pass through the centrally fenced managed-lease selection path (class A).
+    "src/sse/handlers/chat.ts": 1,
     "src/sse/handlers/chatHelpers.ts": 1,
     "src/sse/services/auth.ts": 4,
   },
@@ -186,26 +189,28 @@ const CLASSIFICATION: Record<InventoryKind, Record<string, BypassClass>> = {
   connection: Object.fromEntries(
     Object.keys(EXPECTED.connection).map((file) => [
       file,
-      [
-        "open-sse/handlers/autoComboCandidates.ts",
-        "open-sse/handlers/chatCore.ts",
-        "open-sse/services/combo.ts",
-        "open-sse/services/alibabaFreeTier.ts",
-        "open-sse/services/alibabaFreeTierQuotaFetcher.ts",
-        "open-sse/services/combo/providerWildcard.ts",
-        "open-sse/services/tokenRefresh.ts",
-        "src/app/api/translator/send/route.ts",
-        "src/lib/credentialHealth/scheduler.ts",
-        "src/lib/services/quotaAutoPing.ts",
-        "src/lib/usage/codexResetCredits.ts",
-        "src/lib/usage/providerLimits.ts",
-        "src/lib/vncSession/service.ts",
-        "src/lib/warmupScheduler.ts",
-        "src/shared/services/modelSyncScheduler.ts",
-        "src/sse/services/auth.ts",
-      ].includes(file)
-        ? "B"
-        : "C",
+      file === "src/sse/handlers/chat.ts"
+        ? "A"
+        : [
+              "open-sse/handlers/autoComboCandidates.ts",
+              "open-sse/handlers/chatCore.ts",
+              "open-sse/services/combo.ts",
+              "open-sse/services/alibabaFreeTier.ts",
+              "open-sse/services/alibabaFreeTierQuotaFetcher.ts",
+              "open-sse/services/combo/providerWildcard.ts",
+              "open-sse/services/tokenRefresh.ts",
+              "src/app/api/translator/send/route.ts",
+              "src/lib/credentialHealth/scheduler.ts",
+              "src/lib/services/quotaAutoPing.ts",
+              "src/lib/usage/codexResetCredits.ts",
+              "src/lib/usage/providerLimits.ts",
+              "src/lib/vncSession/service.ts",
+              "src/lib/warmupScheduler.ts",
+              "src/shared/services/modelSyncScheduler.ts",
+              "src/sse/services/auth.ts",
+            ].includes(file)
+          ? "B"
+          : "C",
     ])
   ),
 };
@@ -274,6 +279,26 @@ test("hard-lease credential, executor, and connection-query inventory has no unc
       assert.match(classification, /^[ABC]$/);
     }
   }
+});
+
+test("locked-target account lookup preserves the managed lease and exact connection fence", () => {
+  const chat = fs.readFileSync(path.join(REPO_ROOT, "src/sse/handlers/chat.ts"), "utf8");
+  const start = chat.indexOf(
+    "if (lockedRoutingRequest) {",
+    chat.indexOf("const apiKeyInfo = policy.apiKeyInfo")
+  );
+  const end = chat.indexOf("// OmniRoute-native", start);
+  assert.ok(start >= 0 && end > start);
+  const lockedDispatch = chat.slice(start, end);
+  assert.equal(CLASSIFICATION.connection["src/sse/handlers/chat.ts"], "A");
+  assert.match(lockedDispatch, /getProviderConnectionById\(resolvedTarget\.connectionId\)/);
+  assert.match(
+    lockedDispatch,
+    /connectionMatchesLockedAccount\(connection, lockedRoutingRequest\.target\.account\)/
+  );
+  assert.match(lockedDispatch, /forcedConnectionId: actual\.connectionId/);
+  assert.match(lockedDispatch, /allowedConnectionIds: \[actual\.connectionId\]/);
+  assert.match(lockedDispatch, /managedLease,/);
 });
 
 test("managed request surfaces are fenced centrally or rejected before independent dispatch", () => {

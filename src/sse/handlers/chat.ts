@@ -25,7 +25,7 @@ import {
   isDailyQuotaExhausted,
 } from "@omniroute/open-sse/services/accountFallback.ts";
 import { getCombo, getComboForModel, getModelInfo } from "../services/model";
-import { stripContextWindowSuffix } from "@omniroute/open-sse/services/model.ts";
+import { parseModel, stripContextWindowSuffix } from "@omniroute/open-sse/services/model.ts";
 import { resolveBareModelToConnectionDefault } from "@omniroute/open-sse/services/model.ts";
 import { errorResponse } from "@omniroute/open-sse/utils/error.ts";
 import { getImageModelEntry } from "@omniroute/open-sse/config/imageRegistry.ts";
@@ -120,6 +120,19 @@ import {
 } from "./reasoningRouting";
 import { createVirtualAutoCombo, resolveAutoRoutingState } from "./autoRouting";
 import { getComboFailureLogError } from "./comboFailureLogging";
+import { getProviderConnectionById } from "@/lib/db/providers";
+import {
+  extractLockedRoutingRequest,
+  connectionMatchesLockedAccount,
+  normalizeLockedException,
+  lockedFailureResponse,
+  normalizeLockedFailure,
+  recordLockedTargetReceipt,
+  resolveLockedComboTarget,
+  withLockedTargetEvidence,
+  type LockedExecutionTarget,
+  type LockedRoutingRequest,
+} from "@omniroute/open-sse/services/lockedTarget.ts";
 
 // Pipeline integration — wired modules
 import { classify429FromError, type FailureKind } from "@/shared/utils/classify429";
@@ -370,6 +383,7 @@ async function handleChatImplementation(
   }
 
   let body;
+  let lockedRoutingRequest: LockedRoutingRequest | null = null;
   try {
     telemetry.startPhase("parse");
     body = await resolveChatRequestBody(request, preParsedBody);
@@ -378,6 +392,11 @@ async function handleChatImplementation(
     log.warn("CHAT", "Invalid JSON body");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }
+
+  const lockedExtraction = extractLockedRoutingRequest(body, request.headers);
+  if ("response" in lockedExtraction) return lockedExtraction.response;
+  body = lockedExtraction.body;
+  lockedRoutingRequest = lockedExtraction.locked;
 
   // Feature #6241: fold the canonical `effort` / `thinking` request params onto the
   // per-provider reasoning fields (reasoning_effort / reasoning.effort / thinking) that the
@@ -624,6 +643,97 @@ async function handleChatImplementation(
   }
   const bypassProviderQuotaPolicy = hasProviderQuotaBypassScope(apiKeyInfo?.scopes);
   telemetry.endPhase();
+
+  // Quattro-authoritative requests bypass every target-changing router. The route
+  // must be a single account-pinned combo whose DB connection agrees with the lock.
+  if (lockedRoutingRequest) {
+    // Locked routing bypasses selection, not local safety. Keep the pressure
+    // fuse ahead of all connection/provider work and preserve the original
+    // structured gateway-pressure response so Quattro can retry this exact
+    // plan without treating the selected target as unhealthy.
+    const pressureGuard = checkResourcePressureBeforeProviderWork();
+    if (pressureGuard) {
+      const response = await normalizeLockedFailure(pressureGuard.response, null);
+      await recordLockedTargetReceipt(lockedRoutingRequest, response, null);
+      return response;
+    }
+    let actual: LockedExecutionTarget | null = null;
+    const failLocked = async (
+      type: Parameters<typeof lockedFailureResponse>[0],
+      retryable = false
+    ) => {
+      const response = lockedFailureResponse(
+        type,
+        retryable,
+        null,
+        503,
+        actual,
+        lockedRoutingRequest!.target
+      );
+      await recordLockedTargetReceipt(lockedRoutingRequest!, response, null);
+      return response;
+    };
+    try {
+      const lockedCombo = await getComboByName(lockedRoutingRequest.target.route);
+      const allCombos = await getCombos();
+      if (!lockedCombo) return failLocked("MODEL_UNAVAILABLE");
+      const resolvedTarget = resolveLockedComboTarget(
+        lockedCombo as ComboLike,
+        allCombos,
+        lockedRoutingRequest
+      );
+      if (!resolvedTarget?.connectionId) return failLocked("CAPABILITY_UNSUPPORTED");
+      const connection = (await getProviderConnectionById(resolvedTarget.connectionId)) as Record<
+        string,
+        unknown
+      > | null;
+      if (!connection || connection.isActive === false) {
+        return failLocked("ACCOUNT_UNAVAILABLE");
+      }
+      const actualProvider = String(connection.provider ?? "");
+      if (
+        actualProvider !== lockedRoutingRequest.target.provider ||
+        !connectionMatchesLockedAccount(connection, lockedRoutingRequest.target.account)
+      ) {
+        return failLocked("ACCOUNT_UNAVAILABLE");
+      }
+      const resolvedModel = parseModel(resolvedTarget.modelStr);
+      actual = {
+        provider: actualProvider,
+        account: lockedRoutingRequest.target.account,
+        model: resolvedModel.model || resolvedTarget.modelStr,
+        route: String(lockedCombo.name),
+        connectionId: resolvedTarget.connectionId,
+      };
+      const lockedResponse = await handleSingleModelChat(
+        { ...body, model: `${actual.provider}/${actual.model}` },
+        `${actual.provider}/${actual.model}`,
+        clientRawRequest,
+        request,
+        null,
+        apiKeyInfo,
+        telemetry,
+        {
+          sessionId,
+          sessionAffinityKey,
+          forcedConnectionId: actual.connectionId,
+          allowedConnectionIds: [actual.connectionId],
+          correlationId: reqId,
+          conversationId: null,
+          managedLease,
+          lockedTarget: actual,
+        }
+      );
+      const normalized = await normalizeLockedFailure(lockedResponse, actual);
+      const evidenced = withLockedTargetEvidence(normalized, actual);
+      await recordLockedTargetReceipt(lockedRoutingRequest, evidenced, actual);
+      return evidenced;
+    } catch (error) {
+      const failure = normalizeLockedException(error, actual, lockedRoutingRequest!.target);
+      await recordLockedTargetReceipt(lockedRoutingRequest, failure, actual);
+      return failure;
+    }
+  }
 
   // OmniRoute-native `previous_response_id` continuation: reconstruct the
   // full input server-side before ANY downstream validation/translation
@@ -1305,6 +1415,7 @@ async function handleSingleModelChat(
     reasoningRequestTags?: string[];
     reasoningTransportFallback?: "skip" | "drop";
     managedLease?: ManagedLeaseDispatchContext | null;
+    lockedTarget?: LockedExecutionTarget | null;
     /**
      * Per-target abort signal from combo.ts's targetTimeoutRunner
      * (comboTargetTimeoutMs) — see the #7360 follow-up comment at the
@@ -1329,6 +1440,15 @@ async function handleSingleModelChat(
   // to combo flow. This handles the case where the auto-fuzzy match in
   // resolveModelOrError found a combo but the main handler's combo lookup missed it.
   if ((resolved as any).combo) {
+    if (runtimeOptions.lockedTarget) {
+      return lockedFailureResponse(
+        "CAPABILITY_UNSUPPORTED",
+        false,
+        null,
+        503,
+        runtimeOptions.lockedTarget
+      );
+    }
     const redirectCombo = (resolved as any).combo;
     if (runtimeOptions.managedLease) return managedComboRejection();
     log.info(
@@ -1382,6 +1502,7 @@ async function handleSingleModelChat(
               redirectCombo.config?.reasoningTransportFallback === "skip" ? "skip" : "drop",
             conversationId: runtimeOptions?.conversationId ?? null,
             managedLease: runtimeOptions.managedLease ?? null,
+            lockedTarget: runtimeOptions.lockedTarget ?? null,
             // #7360 follow-up — see the primary handleSingleModel closure above.
             modelAbortSignal: target?.modelAbortSignal ?? null,
           },
@@ -1945,7 +2066,7 @@ async function handleSingleModelChat(
         // for the early close.
         if (
           shouldRetryStreamEarlyEof(result.errorCode, streamEarlyEofRetries) &&
-          !hasForcedConnection
+          (!hasForcedConnection || Boolean(runtimeOptions.lockedTarget))
         ) {
           streamEarlyEofRetries += 1;
           log.warn(
@@ -2099,7 +2220,7 @@ async function handleSingleModelChat(
       // Combo targets never emergency-hop: the combo is the operator's fallback policy
       // (target-level orchestration plus the global fallback #689 after it), and a
       // per-target hop burns extra upstream calls against exhausted providers (#1731).
-      if (!runtimeOptions.emergencyFallbackTried && !comboName) {
+      if (!runtimeOptions.lockedTarget && !runtimeOptions.emergencyFallbackTried && !comboName) {
         const fallbackDecision = shouldUseFallback(
           Number(result.status || 0),
           String(result.error || ""),
@@ -2247,7 +2368,7 @@ async function handleSingleModelChat(
           errorCode: result.errorCode,
           errorType: result.errorType,
           attempt: transportAttempts,
-          hasForcedConnection,
+          hasForcedConnection: hasForcedConnection && !runtimeOptions.lockedTarget,
         })
       ) {
         sameAccountTransportRetries.set(credentials.connectionId, transportAttempts + 1);
