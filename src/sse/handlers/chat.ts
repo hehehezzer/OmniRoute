@@ -136,6 +136,7 @@ import { getComboFailureLogError } from "./comboFailureLogging";
 import { getProviderConnectionById } from "@/lib/db/providers";
 import {
   extractLockedRoutingRequest,
+  consumeTestLockedPressure,
   connectionMatchesLockedAccount,
   normalizeLockedException,
   lockedFailureResponse,
@@ -952,6 +953,11 @@ async function handleChatImplementation(
         });
       }
     };
+    const testPressure = consumeTestLockedPressure(lockedRoutingRequest);
+    if (testPressure) {
+      await persistLockedReceipt(testPressure, null);
+      return testPressure;
+    }
     const pressureGuard = checkResourcePressureBeforeProviderWork();
     if (pressureGuard) {
       const response = await normalizeLockedFailure(pressureGuard.response, null);

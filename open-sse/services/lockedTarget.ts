@@ -30,6 +30,7 @@ export type LockedRoutingRequest = {
   receiptToken: string | null;
   sessionId: string | null;
   turnId: string | null;
+  samePlanDispatchAttempt: number;
   target: LockedRoutingTarget;
 };
 export type LockedExecutionTarget = LockedRoutingTarget & { connectionId: string };
@@ -61,6 +62,8 @@ const requiredString = (value: unknown): string | null =>
   typeof value === "string" && value.trim() ? value.trim() : null;
 
 export const OMNIROUTE_ROUTING_MODE_ENV = "OMNIROUTE_ROUTING_MODE";
+export const OMNIROUTE_TEST_LOCKED_PRESSURE_PLAN_ID_ENV =
+  "OMNIROUTE_TEST_LOCKED_PRESSURE_PLAN_ID";
 export const OMNIROUTE_ROUTING_MODES = ["passthrough", "legacy"] as const;
 export type OmniRouteRoutingMode = (typeof OMNIROUTE_ROUTING_MODES)[number];
 
@@ -87,6 +90,32 @@ export function resolveOmniRouteRoutingMode(
   return (OMNIROUTE_ROUTING_MODES as readonly string[]).includes(mode)
     ? (mode as OmniRouteRoutingMode)
     : null;
+}
+
+/**
+ * Exact-plan live-readiness probe. Dispatch attempt zero remains pressured so
+ * provider-client retries cannot absorb the signal; Quattro's next same-plan
+ * dispatch passes. It is inert unless an operator starts the gateway with the
+ * exact plan id and never changes the requested target.
+ */
+export function consumeTestLockedPressure(
+  request: LockedRoutingRequest
+): Response | null {
+  if (
+    !request.planId ||
+    process.env[OMNIROUTE_TEST_LOCKED_PRESSURE_PLAN_ID_ENV] !== request.planId ||
+    request.samePlanDispatchAttempt !== 0
+  ) {
+    return null;
+  }
+  return lockedFailureResponse(
+    "GATEWAY_RESOURCE_PRESSURE",
+    true,
+    100,
+    503,
+    null,
+    request.target
+  );
 }
 
 const receiptTokenHash = (value: string): string =>
@@ -174,6 +203,15 @@ export function extractLockedRoutingRequest(
   if (!target.provider || !target.account || !target.model || !target.route)
     return { response: lockedFailureResponse("CAPABILITY_UNSUPPORTED", false) };
   const planId = requiredString(routing.planId) ?? requiredString(routing.plan_id);
+  const rawDispatchAttempt =
+    routing.samePlanDispatchAttempt ?? routing.same_plan_dispatch_attempt ?? 0;
+  if (
+    typeof rawDispatchAttempt !== "number" ||
+    !Number.isSafeInteger(rawDispatchAttempt) ||
+    rawDispatchAttempt < 0 ||
+    rawDispatchAttempt > 10
+  )
+    return { response: lockedFailureResponse("CAPABILITY_UNSUPPORTED", false) };
   return {
     body: providerBody,
     locked: {
@@ -181,6 +219,7 @@ export function extractLockedRoutingRequest(
       receiptToken: resolveReceiptCapability(planId, routing.receiptToken ?? routing.receipt_token),
       sessionId: requiredString(routing.sessionId) ?? requiredString(routing.session_id),
       turnId: requiredString(routing.turnId) ?? requiredString(routing.turn_id),
+      samePlanDispatchAttempt: rawDispatchAttempt,
       target: target as LockedRoutingTarget,
     },
   };
