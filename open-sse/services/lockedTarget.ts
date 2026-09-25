@@ -61,6 +61,8 @@ const requiredString = (value: unknown): string | null =>
   typeof value === "string" && value.trim() ? value.trim() : null;
 
 export const OMNIROUTE_ROUTING_MODE_ENV = "OMNIROUTE_ROUTING_MODE";
+export const OMNIROUTE_TEST_LOCKED_PRESSURE_ONCE_ENV =
+  "OMNIROUTE_TEST_LOCKED_PRESSURE_ONCE";
 export const OMNIROUTE_ROUTING_MODES = ["passthrough", "legacy"] as const;
 export type OmniRouteRoutingMode = (typeof OMNIROUTE_ROUTING_MODES)[number];
 
@@ -87,6 +89,33 @@ export function resolveOmniRouteRoutingMode(
   return (OMNIROUTE_ROUTING_MODES as readonly string[]).includes(mode)
     ? (mode as OmniRouteRoutingMode)
     : null;
+}
+
+let testLockedPressureConsumed = false;
+
+/**
+ * One-shot live-readiness probe. It is inert unless an operator explicitly
+ * starts the gateway with the test-only environment flag, and it never changes
+ * the requested target. Restarting without the flag restores normal behavior.
+ */
+export function consumeTestLockedPressure(
+  request: LockedRoutingRequest
+): Response | null {
+  if (
+    process.env[OMNIROUTE_TEST_LOCKED_PRESSURE_ONCE_ENV] !== "1" ||
+    testLockedPressureConsumed
+  ) {
+    return null;
+  }
+  testLockedPressureConsumed = true;
+  return lockedFailureResponse(
+    "GATEWAY_RESOURCE_PRESSURE",
+    true,
+    100,
+    503,
+    null,
+    request.target
+  );
 }
 
 const receiptTokenHash = (value: string): string =>

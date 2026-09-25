@@ -6,6 +6,7 @@ import { resetDbInstance } from "../../../src/lib/db/core.ts";
 
 import {
   classifyLockedFailure,
+  consumeTestLockedPressure,
   connectionMatchesLockedAccount,
   extractLockedRoutingRequest,
   normalizeLockedFailure,
@@ -44,6 +45,28 @@ test("locked passthrough keeps the local pressure fuse before provider dispatch"
     source.slice(pressure, dispatch),
     /persistLockedReceipt\(response, null\)/
   );
+});
+
+test("test-only locked pressure probe fires once without changing target", async () => {
+  const previous = process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_ONCE;
+  process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_ONCE = "1";
+  try {
+    const result = extractLockedRoutingRequest({
+      model: routing.target.route,
+      routing,
+    });
+    assert.ok("locked" in result && result.locked);
+    const first = consumeTestLockedPressure(result.locked);
+    assert.ok(first);
+    const payload = await first.json();
+    assert.equal(payload.error.type, "GATEWAY_RESOURCE_PRESSURE");
+    assert.equal(payload.error.route, routing.target.route);
+    assert.equal(first.headers.get("retry-after"), null);
+    assert.equal(consumeTestLockedPressure(result.locked), null);
+  } finally {
+    if (previous === undefined) delete process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_ONCE;
+    else process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_ONCE = previous;
+  }
 });
 
 test("extracts complete locked request and strips gateway metadata", () => {
