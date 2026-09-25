@@ -47,9 +47,9 @@ test("locked passthrough keeps the local pressure fuse before provider dispatch"
   );
 });
 
-test("test-only locked pressure probe fires once without changing target", async () => {
-  const previous = process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_ONCE;
-  process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_ONCE = "1";
+test("test-only locked pressure probe holds dispatch zero for one exact plan", async () => {
+  const previous = process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_PLAN_ID;
+  process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_PLAN_ID = routing.planId;
   try {
     const result = extractLockedRoutingRequest({
       model: routing.target.route,
@@ -62,10 +62,18 @@ test("test-only locked pressure probe fires once without changing target", async
     assert.equal(payload.error.type, "GATEWAY_RESOURCE_PRESSURE");
     assert.equal(payload.error.route, routing.target.route);
     assert.equal(first.headers.get("retry-after"), null);
-    assert.equal(consumeTestLockedPressure(result.locked), null);
+    assert.ok(consumeTestLockedPressure(result.locked));
+    assert.equal(
+      consumeTestLockedPressure({ ...result.locked, samePlanDispatchAttempt: 1 }),
+      null
+    );
+    assert.equal(
+      consumeTestLockedPressure({ ...result.locked, planId: `${routing.planId}-other` }),
+      null
+    );
   } finally {
-    if (previous === undefined) delete process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_ONCE;
-    else process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_ONCE = previous;
+    if (previous === undefined) delete process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_PLAN_ID;
+    else process.env.OMNIROUTE_TEST_LOCKED_PRESSURE_PLAN_ID = previous;
   }
 });
 
@@ -78,6 +86,7 @@ test("extracts complete locked request and strips gateway metadata", () => {
   assert.equal(result.locked?.target.account, "account-1");
   assert.equal(result.locked?.sessionId, "session-1");
   assert.equal(result.locked?.turnId, "turn-1");
+  assert.equal(result.locked?.samePlanDispatchAttempt, 0);
   assert.equal(result.body.routing, undefined);
 });
 
